@@ -1,11 +1,13 @@
 {
   "name": "talos",
-  "owner": { "name": "pubky" },
+  "owner": {
+    "name": "pubky"
+  },
   "plugins": [
     {
       "name": "talos",
       "source": "./plugins/talos",
-      "description": "Talos, the pubky team's agent, as a skill and MCP tools: search team history, ask Talos, request PR reviews."
+      "description": "Talos, the pubky team's agent, as a skill and MCP tools: search team history, read the team's knowledge skills, file issues and docs, book calls, request PR reviews, ask or delegate."
     }
   ]
 }
