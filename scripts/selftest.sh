@@ -7,7 +7,7 @@ set -u
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 CLI="$HERE/talos"
 T="$(mktemp -d)"
-trap 'kill ${V2:-0} ${V1:-0} 2>/dev/null; rm -rf "$T"' EXIT
+trap 'kill ${V2:-0} ${V1:-0} ${GH:-0} 2>/dev/null; rm -rf "$T"' EXIT
 P2=$((17600 + RANDOM % 400)); P1=$((18100 + RANDOM % 400))
 
 cat > "$T/stub.py" <<'EOF'
@@ -48,9 +48,22 @@ class H(BaseHTTPRequestHandler):
         self.end_headers(); self.wfile.write(data)
     def missing(self):
         self.reply(404, {"error": "no route", "hint": "rerun install.sh", "code": "no_such_route"})
+    def mode(self):
+        try:
+            return open(sys.argv[3]).read().strip()
+        except OSError:
+            return "unset"
     def do_GET(self):
         if self.path == "/health":
             return self.reply(200, {"status": "ok", "version": "0.2.0" if MODE == "v02" else "0.1.0"})
+        if self.path == "/desk-url.txt":
+            return self.reply(200, ("http://127.0.0.1:%s\n" % sys.argv[1]).encode(), "text/plain")
+        if self.path == "/login/config":
+            if self.mode() == "unset":
+                return self.reply(503, {"error": "this desk has no GitHub OAuth app configured",
+                                        "hint": "device login not configured yet; use talos login <token>",
+                                        "code": "error"})
+            return self.reply(200, {"github_client_id": self.mode(), "org": "pubky"})
         if self.path == "/me":
             return self.reply(200, {"handle": "tester", "asks_today": 1, "asks_per_day": 30,
                                     "asks_global_today": 3, "asks_global_per_day": 200,
@@ -67,6 +80,12 @@ class H(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(n) or b"{}")
         path = self.path
+        if path == "/login/github":
+            if body.get("access_token") != "gho_fake":
+                return self.reply(401, {"error": "GitHub rejected that token", "hint": "run `talos login` again",
+                                        "code": "no_token"})
+            return self.reply(200, {"token": "tdk_stub", "handle": "tester", "rotated": True,
+                                    "note": "this is now the only desk token for @tester; the previous one stopped working"})
         if MODE == "v01" and path.startswith("/v/"):
             return self.missing()
         if path in ("/v/ask", "/ask"):
@@ -87,8 +106,49 @@ class H(BaseHTTPRequestHandler):
 HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 EOF
 
-python3 "$T/stub.py" "$P2" v02 & V2=$!
-python3 "$T/stub.py" "$P1" v01 & V1=$!
+echo unset > "$T/mode"
+
+# a stub GitHub: the client id doubles as the scenario the device flow should play out
+cat > "$T/github.py" <<'EOF'
+"""GitHub's device endpoints, faked. argv: <port> <state file>."""
+import json, sys, urllib.parse
+from http.server import BaseHTTPRequestHandler, HTTPServer
+SEEN = {}
+class H(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def log_message(self, *a): pass
+    def reply(self, body):
+        data = json.dumps(body).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        form = urllib.parse.parse_qs(self.rfile.read(n).decode())
+        if self.path.endswith("/device/code"):
+            mode = form.get("client_id", [""])[0]
+            if mode == "badapp":
+                return self.reply({"error": "unauthorized_client", "error_description": "no such app"})
+            return self.reply({"device_code": mode, "user_code": "ABCD-1234", "interval": 1,
+                               "verification_uri": "https://github.com/login/device", "expires_in": 60})
+        mode = form.get("device_code", [""])[0]
+        SEEN[mode] = SEEN.get(mode, 0) + 1
+        if mode == "denied":
+            return self.reply({"error": "access_denied"})
+        if mode == "expired":
+            return self.reply({"error": "expired_token"})
+        if mode == "slow" and SEEN[mode] == 1:
+            return self.reply({"error": "slow_down", "interval": 1})
+        if mode == "pending" and SEEN[mode] == 1:
+            return self.reply({"error": "authorization_pending"})
+        return self.reply({"access_token": "gho_fake"})
+HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+EOF
+PG=$((18600 + RANDOM % 400))
+python3 "$T/github.py" "$PG" & GH=$!
+export TALOS_GITHUB_OAUTH="http://127.0.0.1:$PG"
+
+python3 "$T/stub.py" "$P2" v02 "$T/mode" & V2=$!
+python3 "$T/stub.py" "$P1" v01 "$T/mode" & V1=$!
 for _ in $(seq 40); do curl -fsS "http://127.0.0.1:$P2/health" >/dev/null 2>&1 && break; sleep 0.25; done
 
 export XDG_CONFIG_HOME="$T/config" TALOS_TOKEN=tdk_stub TALOS_URL="http://127.0.0.1:$P2"
@@ -103,7 +163,7 @@ t() { # t <name> <expected exit> <grep pattern> -- <args...>
 
 # help and discovery, no desk needed
 t no-args 0 "read     free" --
-t version 0 "talos 0.2.0" -- --version
+t version 0 "talos 0.3.0" -- --version
 t help-verb 0 "needs --yes" -- help issue
 t help-flag 0 "exit codes" -- issue --help
 t unknown 2 "unknown command" -- nosuchverb
@@ -167,6 +227,37 @@ grep -q "the served sheet" "$T/fakehome/.claude/skills/talos/SKILL.md" 2>/dev/nu
   && PASS=$((PASS+1)) || { echo "FAIL skill not refreshed from the desk"; FAIL=$((FAIL+1)); }
 grep -q "^name: talos" "$T/fakehome/.claude/skills/talos/SKILL.md" 2>/dev/null \
   && PASS=$((PASS+1)) || { echo "FAIL skill frontmatter"; FAIL=$((FAIL+1)); }
+
+# device login: the desk hands out the client id, GitHub plays out each scenario
+echo unset > "$T/mode"
+t login-no-clientid 1 "use talos login <token>" -- login
+echo ok > "$T/mode"
+t login-device 0 "Open https://github.com/login/device and enter code ABCD-1234" -- login
+t login-device-handle 0 "logged in as @tester" -- login
+echo denied > "$T/mode"
+t login-denied 1 "cancelled on GitHub" -- login
+echo expired > "$T/mode"
+t login-expired 1 "expired before you entered it" -- login
+echo slow > "$T/mode"
+t login-slow-down 0 "logged in as @tester" -- login
+echo pending > "$T/mode"
+t login-pending 0 "logged in as @tester" -- login
+echo badapp > "$T/mode"
+t login-bad-app 1 "refused to start the login" -- login
+echo ok > "$T/mode"
+
+# the stored desk is dead and the pointer file names a live one
+( unset TALOS_URL
+  export XDG_CONFIG_HOME="$T/moved" TALOS_POINTER_URL="http://127.0.0.1:$P2/desk-url.txt"
+  mkdir -p "$T/moved/talos"
+  echo '{"url": "http://127.0.0.1:1", "token": "tdk_stub"}' > "$T/moved/talos/config.json"
+  "$CLI" login tdk_stub >/dev/null 2>&1 || exit 1
+  grep -q "127.0.0.1:$P2" "$T/moved/talos/config.json" ) \
+  && PASS=$((PASS+1)) || { echo "FAIL pointer file did not move the desk"; FAIL=$((FAIL+1)); }
+
+# the plugin ships the same CLI, byte for byte
+cmp -s "$HERE/talos" "$HERE/plugins/talos/bin/talos" \
+  && PASS=$((PASS+1)) || { echo "FAIL plugins/talos/bin/talos is stale: run scripts/sync-plugin.sh"; FAIL=$((FAIL+1)); }
 
 # doctor passes every check against a healthy desk once setup has run
 "$CLI" setup >/dev/null 2>&1
