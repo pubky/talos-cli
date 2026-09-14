@@ -1,5 +1,5 @@
 {
   "name": "talos",
-  "version": "0.2.0",
-  "description": "Talos, the pubky team's agent: search team history, read what the team wrote down, file issues and docs, book calls, request PR reviews, ask or delegate. Needs the talos CLI: curl -fsSL https://raw.githubusercontent.com/pubky/talos-cli/main/install.sh | sh"
+  "version": "0.3.0",
+  "description": "Talos, the pubky team's agent: search team history, read what the team wrote down, file issues and docs, book calls, request PR reviews, ask or delegate. The CLI ships with the plugin; run `python3 ${CLAUDE_PLUGIN_ROOT}/bin/talos login` to sign in with GitHub."
 }

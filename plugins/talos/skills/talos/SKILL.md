@@ -10,6 +10,8 @@ This page is a snapshot of the sheet the desk serves; `talos setup` and
 
 Rule of thumb: `talos find` first, it is free and instant. Then `talos skills` for what the team already wrote down. `talos ask` only when the answer needs Talos's own memory or judgement, and `talos delegate` when the job takes minutes and you do not want to wait.
 
+Not logged in? Run `talos login`, open the GitHub device prompt it prints and enter the code. The desk checks you are in the pubky org and gives you a token of its own; logging in again rotates that token and the old one stops working. Someone outside the org uses `talos login <token>` with a token from @SHAcollision.
+
 ## Read verbs: free, seconds, no model
 
 `talos find "<words>" [--in slack,meet,drive,github,code,pubky] [--days N] [--from who] [--limit N]`
@@ -213,3 +215,16 @@ talos delegate "compare the nexus watcher lag before and after #123" --key lag-1
 - The desk does not move or cancel other people's calls, and files issues in pubky and synonymdev only.
 
 Exit codes: 0 ok, 1 error, 2 usage, 3 over budget, 4 not logged in, 5 needs --yes, 6 not found, 7 refused by a Talos rule.
+
+## Running it from this plugin
+
+The CLI ships inside the plugin, so there is nothing to install:
+
+```
+python3 ${CLAUDE_PLUGIN_ROOT}/bin/talos find "nexus watcher lag"
+```
+
+If any verb answers `not logged in` (exit 4), run `python3 ${CLAUDE_PLUGIN_ROOT}/bin/talos login`,
+show the user the "Open ... and enter code ..." line it prints, and wait: they open that page and
+type the code. No token and no desk URL to ask for. On a machine that has `talos` on the PATH the
+plain `talos` command does the same thing.

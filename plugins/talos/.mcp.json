@@ -1,6 +1,6 @@
 {
   "talos": {
-    "command": "talos",
-    "args": ["mcp"]
+    "command": "python3",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/bin/talos", "mcp"]
   }
 }
