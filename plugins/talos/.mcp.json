@@ -1,0 +1,6 @@
+{
+  "talos": {
+    "command": "talos",
+    "args": ["mcp"]
+  }
+}

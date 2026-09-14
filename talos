@@ -1,0 +1,338 @@
+#!/usr/bin/env python3
+"""talos: Talos, the pubky team's agent, from your terminal or your coding agent.
+
+  talos login <token> [--url https://...]   store the token (0600) and check it
+  talos find "<words>" [--in slack,meet,drive,github,code,pubky] [--days N] [--from who] [--limit N] [--json]
+  talos ask "<question>" [--thread name] [--json]     one Talos turn; progress on stderr, answer on stdout
+  talos review <pr-url | owner/repo#num>              request Talos's review; it lands on the PR
+  talos whoami                                        handle and asks left today
+  talos setup                                         register the MCP server and skill with Claude Code and Codex
+  talos mcp                                           stdio MCP server (what Claude Code and Codex run)
+
+Exit codes: 0 ok, 1 error, 2 usage, 3 over budget, 4 not logged in or token revoked.
+Single file, Python 3.8+, standard library only. Source: https://github.com/pubky/talos-cli
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+VERSION = "0.1.0"
+CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "talos")
+CONFIG = os.path.join(CONFIG_DIR, "config.json")
+DEFAULT_URL = os.environ.get("TALOS_URL", "")
+
+
+def load_config():
+    try:
+        return json.load(open(CONFIG))
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def save_config(c):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CONFIG, "w") as fh:
+        json.dump(c, fh, indent=1)
+    os.chmod(CONFIG, 0o600)
+
+
+def die(msg, code=1):
+    sys.stderr.write(f"talos: {msg}\n")
+    sys.exit(code)
+
+
+def api(method, path, body=None, stream=False, timeout=120):
+    c = load_config()
+    url, tok = c.get("url") or DEFAULT_URL, os.environ.get("TALOS_TOKEN") or c.get("token")
+    if not url or not tok:
+        die("not logged in: talos login <token> --url <desk url>", 4)
+    req = urllib.request.Request(url.rstrip("/") + path, method=method, data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json", "User-Agent": f"talos-cli/{VERSION}"})
+    try:
+        r = urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        try:
+            err = json.load(e).get("error", "")
+        except ValueError:
+            err = e.reason
+        if e.code == 401:
+            die(f"{err}", 4)
+        if e.code == 429:
+            die(f"over budget: {err}", 3)
+        die(f"{e.code}: {err}")
+    except urllib.error.URLError as e:
+        die(f"cannot reach the desk at {url}: {e.reason}")
+    minv = r.headers.get("X-Talos-Min-Client")
+    if minv and tuple(map(int, minv.split("."))) > tuple(map(int, VERSION.split("."))):
+        sys.stderr.write(f"talos: client {VERSION} is older than the desk wants ({minv}); rerun install.sh\n")
+    return r if stream else json.load(r)
+
+
+def opts(argv, flags):
+    """positional args and --k v pairs; flags in `flags` take no value."""
+    pos, kv, i = [], {}, 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("--"):
+            k = a[2:]
+            if k in flags:
+                kv[k] = True; i += 1
+            elif i + 1 < len(argv):
+                kv[k] = argv[i + 1]; i += 2
+            else:
+                die(f"--{k} needs a value", 2)
+        else:
+            pos.append(a); i += 1
+    return pos, kv
+
+
+def cmd_login(argv):
+    pos, kv = opts(argv, set())
+    if not pos:
+        die("usage: talos login <token> [--url https://talos.example]", 2)
+    c = load_config()
+    c["token"] = pos[0]
+    if kv.get("url"):
+        c["url"] = kv["url"]
+    if not c.get("url") and DEFAULT_URL:
+        c["url"] = DEFAULT_URL
+    if not c.get("url"):
+        die("first login needs --url <desk url> (it is in the onboarding message)", 2)
+    save_config(c)
+    me = api("GET", "/me")
+    print(f"logged in as @{me['handle']} at {c['url']}; {me['asks_per_day'] - me['asks_today']} asks left today")
+
+
+def print_find(out):
+    res, errors = out.get("results", {}), out.get("errors", {})
+    n = 0
+    for source, hits in res.items():
+        if not hits:
+            continue
+        print(f"== {source}")
+        for h in hits:
+            n += 1
+            when = h.get("date") or h.get("when") or ""
+            if not when and h.get("ts"):
+                import datetime as dt
+                when = dt.datetime.utcfromtimestamp(float(h["ts"])).strftime("%Y-%m-%d")
+            print(f"{when}  {h.get('who', '')}  {h.get('where', '')}")
+            if h.get("snippet"):
+                print(f"    {str(h['snippet']).strip()}")
+            if h.get("link"):
+                print(f"    {h['link']}")
+    for source, e in errors.items():
+        sys.stderr.write(f"{source}: {e}\n")
+    if n == 0:
+        print("no hits")
+
+
+def cmd_find(argv):
+    pos, kv = opts(argv, {"json"})
+    if not pos:
+        die('usage: talos find "<words>" [--in sources] [--days N] [--from who] [--limit N] [--json]', 2)
+    body = {"query": " ".join(pos)}
+    for k in ("in", "days", "from", "limit"):
+        if k in kv:
+            body[k] = kv[k]
+    out = api("POST", "/find", body)
+    if kv.get("json"):
+        print(json.dumps(out, indent=1))
+    else:
+        print_find(out)
+
+
+def cmd_ask(argv):
+    pos, kv = opts(argv, {"json"})
+    q = " ".join(pos) if pos else (sys.stdin.read().strip() if not sys.stdin.isatty() else "")
+    if not q:
+        die('usage: talos ask "<question>" [--thread name] [--json]  (or pipe the question in)', 2)
+    body = {"question": q, "stream": True}
+    if kv.get("thread"):
+        body["thread"] = kv["thread"]
+    r = api("POST", "/ask", body, stream=True, timeout=20 * 60)
+    ev, final = None, None
+    for raw in r:
+        line = raw.decode("utf-8", "replace").rstrip("\n")
+        if line.startswith("event:"):
+            ev = line[6:].strip()
+        elif line.startswith("data:") and ev:
+            try:
+                p = json.loads(line[5:].strip())
+            except ValueError:
+                continue
+            if ev == "run.started":
+                sys.stderr.write(f"talos is on it (thread {p.get('thread')})\n")
+            elif ev == "tool.started":
+                sys.stderr.write(f"  {p.get('tool')}\n")
+            elif ev in ("run.completed", "run.failed"):
+                final = (ev, p)
+                break
+    if not final:
+        die("the desk closed the stream without an answer")
+    ev, p = final
+    if ev == "run.failed":
+        die(p.get("error", "the turn failed"))
+    if kv.get("json"):
+        print(json.dumps(p, indent=1))
+    else:
+        print(p.get("answer", "").rstrip()); sys.stdout.flush()
+        sys.stderr.write(f"\n(thread {p.get('thread')}, {p.get('seconds')}s; follow up with --thread {p.get('thread')})\n")
+
+
+def cmd_review(argv):
+    pos, kv = opts(argv, set())
+    if not pos:
+        die("usage: talos review <pr-url | owner/repo#num>", 2)
+    out = api("POST", "/review", {"pr": pos[0]})
+    print(f"{out.get('status')}: {out.get('note')}\n{out.get('url')}")
+
+
+def cmd_whoami(argv):
+    me = api("GET", "/me")
+    print(f"@{me['handle']}: {me['asks_today']}/{me['asks_per_day']} asks today (resets {me['resets_at']}), desk-wide {me['asks_global_today']}/{me['asks_global_per_day']}")
+
+
+# ---------- MCP over stdio: every request goes to the desk's /mcp as is ----------
+
+def cmd_mcp(argv):
+    c = load_config()
+    url, tok = c.get("url") or DEFAULT_URL, os.environ.get("TALOS_TOKEN") or c.get("token")
+    out = sys.stdout
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if not url or not tok:
+            if msg.get("id") is not None:
+                out.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": "talos is not logged in: run `talos login <token>`"}}) + "\n"); out.flush()
+            continue
+        req = urllib.request.Request(url.rstrip("/") + "/mcp", method="POST", data=json.dumps(msg).encode(),
+                                     headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json", "User-Agent": f"talos-cli/{VERSION}"})
+        try:
+            r = urllib.request.urlopen(req, timeout=20 * 60)
+            if r.status == 202 or msg.get("id") is None:
+                continue
+            out.write(r.read().decode() + "\n"); out.flush()
+        except urllib.error.HTTPError as e:
+            try:
+                err = json.load(e).get("error", str(e.reason))
+            except ValueError:
+                err = str(e.reason)
+            if msg.get("id") is not None:
+                out.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": f"desk {e.code}: {err}"}}) + "\n"); out.flush()
+        except urllib.error.URLError as e:
+            if msg.get("id") is not None:
+                out.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": f"cannot reach the desk: {e.reason}"}}) + "\n"); out.flush()
+
+
+# ---------- setup: skill files and MCP registration for Claude Code and Codex ----------
+
+def write_skill(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write(SKILL_MD)
+    print(f"skill: {path}")
+
+
+def cmd_setup(argv):
+    me = shutil.which("talos") or os.path.abspath(__file__)
+    # Claude Code: user-level skill; MCP through the CLI when `claude` is present
+    write_skill(os.path.expanduser("~/.claude/skills/talos/SKILL.md"))
+    if shutil.which("claude"):
+        r = subprocess.run(["claude", "mcp", "add", "-s", "user", "talos", "--", me, "mcp"], capture_output=True, text=True)
+        print("claude: mcp server talos registered" if r.returncode == 0 else f"claude: {(r.stderr or r.stdout).strip()[-200:]}")
+    # Codex: skill dir plus an mcp_servers block in config.toml
+    write_skill(os.path.expanduser("~/.codex/skills/talos/SKILL.md"))
+    codex = os.path.expanduser("~/.codex/config.toml")
+    block = f'\n[mcp_servers.talos]\ncommand = "{me}"\nargs = ["mcp"]\n'
+    try:
+        cur = open(codex).read()
+    except FileNotFoundError:
+        cur = ""
+    if "[mcp_servers.talos]" not in cur:
+        os.makedirs(os.path.dirname(codex), exist_ok=True)
+        with open(codex, "a") as fh:
+            fh.write(block)
+        print(f"codex: mcp server talos added to {codex}")
+    else:
+        print("codex: mcp server talos already in config.toml")
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip()); sys.exit(0 if argv else 2)
+    if argv[0] in ("-V", "--version", "version"):
+        print(f"talos {VERSION}"); return
+    cmds = {"login": cmd_login, "find": cmd_find, "ask": cmd_ask, "review": cmd_review, "whoami": cmd_whoami, "mcp": cmd_mcp, "setup": cmd_setup}
+    fn = cmds.get(argv[0])
+    if not fn:
+        die(f"unknown command {argv[0]}; talos --help", 2)
+    fn(argv[1:])
+
+
+SKILL_MD = r'''
+---
+name: talos
+description: "Talos is the pubky team's agent. Use it to search team history (Slack, Meet transcripts, Drive, GitHub, pubky.app), to ask what only Talos knows, and to request PR reviews. Trigger on: where did we discuss, did anyone report, who owns, what did the call conclude, who is out, ask Talos, get a review."
+---
+
+# Talos from the terminal
+
+`talos` is on PATH once installed (`talos --version`). Same three verbs as MCP tools
+(`talos_find`, `talos_ask`, `talos_review`) if the MCP server is registered; use whichever is
+available, never both for the same question.
+
+## find: any lookup, first
+
+```
+talos find "nexus watcher lag"                      # every source, last 30 days
+talos find "release checklist" --in drive,meet      # sources: slack,meet,drive,github,code,pubky
+talos find "signup token" --days 90 --from ok300    # window and author (Slack name or GitHub login)
+talos find "mbx" --json                             # for scripting
+```
+
+Seconds, no model, no budget. Results carry date, who, where, a snippet and a link. Quote the
+link when you use a hit. When the user asks "where did we decide X", "did anyone file Y", "who
+owns Z", "what did the call about W conclude", "is there a doc on V": run `talos find` before
+answering from memory.
+
+## ask: what only Talos knows
+
+```
+talos ask "why did settings leave the pubky-app spec, and who decided?"
+talos ask --thread t1 "and what replaced it?"       # follow-up, same conversation
+```
+
+One Talos turn: 30 to 180 seconds, a budget of 30 per person per day. Use it when the answer
+needs Talos's memory, cross-repo context, who is out (HiBob), Sentry, CI history, or a
+judgement from the team's side. Do not use it for lookups (`find` does that) or to make Talos
+do work you can do yourself. One ask per question; on `over budget` stop and tell the user.
+Every ask is logged with your handle and shows up in the team's ops channel.
+
+## review: after opening a PR in a pubky repo
+
+```
+talos review https://github.com/pubky/pubky-nexus/pull/123
+```
+
+Returns at once; the review lands on the PR within minutes. One review per PR head; for a
+second look, mention @talosmachina on the PR.
+
+## Rules
+
+- Never paste secrets, tokens or private keys into an ask.
+- Exit 3 means over budget, 4 means the token is missing or revoked (`talos login <token>`).
+- `talos whoami` shows the handle and the asks left today.
+'''.lstrip()
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
