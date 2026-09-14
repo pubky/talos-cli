@@ -14,66 +14,26 @@ talos delegate "long job"               hand him a job, collect it later with `t
 
 ## Install
 
-1. Ask @SHAcollision for a token (one per person, revocable). It comes with the desk URL.
-2. Install the CLI. It registers itself with Claude Code and Codex when they are present:
+Two commands, and you run them yourself in your terminal, not through your agent: the second
+one carries your token, and agents are right to refuse to handle secrets pasted into a prompt.
+
+1. Ask @SHAcollision for a token. It comes with the desk URL.
+2. Run:
 
    ```
    curl -fsSL https://raw.githubusercontent.com/pubky/talos-cli/main/install.sh | sh
    talos login <token> --url <desk url>
    ```
 
-   Claude Code users can also take the plugin route: `/plugin marketplace add pubky/talos-cli`,
-   then `/plugin install talos`. The plugin's MCP server runs `talos mcp`, so step 2 is still
-   needed once for the binary.
+3. `talos whoami` should print your name. Done: the installer also wrote the skill for Claude
+   Code and Codex and registered the MCP server, so your agent already knows when to use Talos.
+   Tell it "use talos for anything about the team" and it takes it from there.
 
-3. Check: `talos doctor`. It reports the config file, the desk URL, the token, whether the desk
-   answers, whether the token is valid, whether the skill is installed, whether the MCP server is
-   registered and whether this client is current, with the fix for anything that failed.
+Claude Code users can take the plugin route instead of step 2's first line:
+`/plugin marketplace add pubky/talos-cli`, then `/plugin install talos`, then `talos login`.
 
-## The verbs
-
-Read verbs are free and take seconds. Write verbs change something, so they print exactly what
-they would do and exit 5 until you pass `--yes`. Agent verbs spend one of Talos's turns and are
-budgeted.
-
-| tier | verb | what it does |
-|---|---|---|
-| read | `find "<words>"` | search Slack, Meet transcripts, Drive, GitHub, pubky.app |
-| read | `open <slack link>` | the whole thread behind a hit |
-| read | `skill` | the capability sheet the desk serves |
-| read | `skills [<name>]` | the knowledge the team wrote down, readable in full |
-| read | `whosout [--weeks N]` | who is on holiday |
-| read | `status` | Talos's own health |
-| read | `who <name>` | team, GitHub login, Slack id |
-| read | `inbox [--all]` | what you asked the desk for lately |
-| read | `review status <pr>` | did Talos review it, and if not why |
-| read | `jobs`, `result <id> [--wait]`, `stop <id>` | your delegated runs |
-| read | `doc read <id>`, `meet list` | a doc back as markdown, calls on record |
-| write | `review <pr>` | ask Talos to review a PR |
-| write | `issue <owner/repo> "<title>"` | file an issue, signed with your handle |
-| write | `doc create --title T --md f` | markdown into a formatted Google Doc |
-| write | `meet book ...` | book a call; the preview warns who is on holiday |
-| write | `remember "<fact>"` | one durable fact, as a PR a human merges |
-| agent | `ask "<question>"` | one Talos turn, 30 per person per day |
-| agent | `delegate "<task>" [--key K]` | a run id at once, 5 per day |
-
-`talos <verb> --help` prints the usage, the tier and an example. Global flags: `--json` (the
-desk's JSON, documented per verb), `--yes`, `--quiet`, `--url`.
-
-## Exit codes
-
-| code | meaning |
-|---|---|
-| 0 | ok |
-| 1 | error (the message says what, and what to do) |
-| 2 | usage; the usage line for that verb comes with it |
-| 3 | over budget; the reset time comes with it |
-| 4 | not logged in, or the token was revoked |
-| 5 | a write verb without `--yes`; the preview is on stdout |
-| 6 | not found: an unknown skill, run or PR, or a verb this desk does not have yet |
-| 7 | refused by a Talos rule; the rule is quoted |
-
-The result goes to stdout, progress and hints to stderr, so `talos find x > hits.txt` is clean.
+`talos setup` reruns the registration and refreshes the skill from the desk; `talos doctor`
+checks the whole chain and says what to fix.
 
 ## Using it from an agent
 
