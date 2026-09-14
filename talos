@@ -2,13 +2,18 @@
 """talos: Talos, the pubky team's agent, from your terminal or your coding agent.
 
   talos                      list every verb by tier      talos <verb> --help   usage and flags
-  talos login <token> [--url https://...]                 store the token (0600) and check it
+  talos login                                             log in with your GitHub account (device prompt)
+  talos login <token> [--url https://...]                 log in with a token instead (people outside the org)
   talos doctor                                            check config, desk, token, skill, MCP, version
   talos setup                                             register the skill and MCP server, refresh the sheet
   talos mcp                                               stdio MCP server (what Claude Code and Codex run)
 
 Global flags: --json (the desk's JSON on stdout), --yes (do it, for write verbs), --url, --quiet.
 Environment: TALOS_TOKEN, TALOS_URL.
+
+The desk URL comes from --url, then TALOS_URL, then the stored config, then the pointer file at
+https://raw.githubusercontent.com/pubky/talos-cli/main/desk-url.txt. Moving the desk is one commit
+to that file; `talos login` and `talos doctor` pick the new address up on their own.
 
 Exit codes: 0 ok, 1 error, 2 usage, 3 over budget, 4 not logged in or token revoked, 5 needs --yes,
 6 not found, 7 refused by a Talos rule.
@@ -19,15 +24,20 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "talos")
 CONFIG = os.path.join(CONFIG_DIR, "config.json")
-DEFAULT_URL = os.environ.get("TALOS_URL", "")
 SKILL_PATHS = [os.path.expanduser("~/.claude/skills/talos/SKILL.md"),
                os.path.expanduser("~/.codex/skills/talos/SKILL.md")]
+
+# Where the desk lives when nobody said. One line, one commit to move the whole team.
+POINTER_URL = os.environ.get("TALOS_POINTER_URL") or "https://raw.githubusercontent.com/pubky/talos-cli/main/desk-url.txt"
+GITHUB_OAUTH = os.environ.get("TALOS_GITHUB_OAUTH") or "https://github.com"
 
 # Exit codes by HTTP status. The desk picks the status, so the two stay in step.
 EXIT = {400: 2, 401: 4, 403: 4, 404: 6, 409: 7, 429: 3}
@@ -174,13 +184,51 @@ def note(msg):
         sys.stderr.write(msg + "\n")
 
 
-def endpoint():
+def health(url):
+    try:
+        r = urllib.request.urlopen(url.rstrip("/") + "/health", timeout=15)
+        return json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+
+def pointer_url():
+    """One line in the repo says where the desk is today, so an instruction never carries a URL."""
+    try:
+        raw = urllib.request.urlopen(POINTER_URL, timeout=15).read(500).decode("utf-8", "replace")
+    except Exception:
+        return ""
+    line = raw.strip().splitlines()[0].strip() if raw.strip() else ""
+    return line if line.startswith("http") else ""
+
+
+def resolve_url(refresh=False):
+    """--url and TALOS_URL win, then the stored one, then the pointer file. refresh re-reads the
+    pointer when the stored desk stopped answering, so a desk that moved fixes itself."""
+    env = os.environ.get("TALOS_URL")
+    if env:
+        return env.rstrip("/")
     c = load_config()
-    url = os.environ.get("TALOS_URL") or c.get("url") or DEFAULT_URL
-    tok = os.environ.get("TALOS_TOKEN") or c.get("token")
-    if not url or not tok:
-        die("not logged in", 4, "talos login <token> --url <desk url>")
-    return url.rstrip("/"), tok
+    url = (c.get("url") or "").rstrip("/")
+    if url and (not refresh or health(url)):
+        return url
+    found = pointer_url().rstrip("/")
+    if found and found != url and (not url or health(found)):
+        c["url"] = found
+        save_config(c)
+        note("talos: the desk is at %s now (from the pointer file)" % found)
+        return found
+    return url
+
+
+def endpoint():
+    tok = os.environ.get("TALOS_TOKEN") or load_config().get("token")
+    if not tok:
+        die("not logged in", 4, "run `talos login` and complete the GitHub prompt it prints")
+    url = resolve_url()
+    if not url:
+        die("no desk url, and the pointer file did not answer", 1, "talos login --url <desk url>")
+    return url, tok
 
 
 class Desk(Exception):
@@ -196,16 +244,13 @@ def version_tuple(v):
         return (0,)
 
 
-def request(method, path, body=None, stream=False, timeout=120):
-    url, tok = endpoint()
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url + path, data=data,
-                                 headers={"Authorization": "Bearer " + tok,
-                                          "Content-Type": "application/json",
-                                          "User-Agent": "talos-cli/" + VERSION})
+def open_url(method, url, body=None, headers=None, timeout=120):
+    h = {"Content-Type": "application/json", "User-Agent": "talos-cli/" + VERSION}
+    h.update(headers or {})
+    req = urllib.request.Request(url, data=json.dumps(body).encode() if body is not None else None, headers=h)
     req.get_method = lambda: method
     try:
-        r = urllib.request.urlopen(req, timeout=timeout)
+        return urllib.request.urlopen(req, timeout=timeout)
     except urllib.error.HTTPError as e:
         try:
             payload = json.loads(e.read().decode("utf-8", "replace"))
@@ -214,6 +259,11 @@ def request(method, path, body=None, stream=False, timeout=120):
         raise Desk(e.code, payload.get("error") or str(e.reason), payload.get("hint", ""), payload.get("code", ""))
     except urllib.error.URLError as e:
         die("cannot reach the desk at %s: %s" % (url, e.reason), 1, "check it with `talos doctor`")
+
+
+def request(method, path, body=None, stream=False, timeout=120):
+    url, tok = endpoint()
+    r = open_url(method, url + path, body, {"Authorization": "Bearer " + tok}, timeout)
     minv = r.headers.get("X-Talos-Min-Client")
     if minv and version_tuple(minv) > version_tuple(VERSION):
         note("talos: this client is %s, the desk wants %s; rerun install.sh" % (VERSION, minv))
@@ -465,26 +515,97 @@ def cmd_ask(body, kv):
 
 # ---------- login, whoami, doctor, setup ----------
 
+def post_form(url, fields, timeout=30):
+    data = urllib.parse.urlencode(fields).encode()
+    req = urllib.request.Request(url, data=data, headers={
+        "Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "talos-cli/" + VERSION})
+    try:
+        r = urllib.request.urlopen(req, timeout=timeout)
+        raw = r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", "replace")
+    except urllib.error.URLError as e:
+        die("cannot reach GitHub at %s: %s" % (url, e.reason), 1, "check your network and try again")
+    try:
+        return json.loads(raw)
+    except ValueError:
+        die("GitHub answered something that is not JSON", 1, "try again, or use `talos login <token>`")
+
+
+def device_login(url, as_json):
+    """GitHub's device flow: the user opens a page and types a code, no secret on this machine."""
+    try:
+        cfg = json.loads(open_url("GET", url + "/login/config", timeout=20).read().decode("utf-8", "replace"))
+    except Desk as ex:
+        die(ex.error, EXIT.get(ex.status, 1), ex.hint or "use `talos login <token>` instead")
+    start = post_form(GITHUB_OAUTH + "/login/device/code",
+                      {"client_id": cfg["github_client_id"], "scope": "read:org"})
+    if start.get("error") or not start.get("device_code"):
+        die("GitHub refused to start the login: %s" % (start.get("error") or "no device code"),
+            1, start.get("error_description") or "tell @SHAcollision; the desk's OAuth app may be wrong")
+    line = "Open %s and enter code %s" % (start.get("verification_uri"), start.get("user_code"))
+    sys.stderr.write(line + "\n")
+    if not as_json:
+        print(line)
+        sys.stdout.flush()
+    interval = int(start.get("interval") or 5)
+    deadline = time.time() + int(start.get("expires_in") or 900)
+    while time.time() < deadline:
+        time.sleep(interval)
+        r = post_form(GITHUB_OAUTH + "/login/oauth/access_token",
+                      {"client_id": cfg["github_client_id"], "device_code": start["device_code"],
+                       "grant_type": "urn:ietf:params:oauth:grant-type:device_flow"})
+        err = r.get("error")
+        if not err and r.get("access_token"):
+            return r["access_token"]
+        if err == "authorization_pending":
+            continue
+        if err == "slow_down":
+            interval = int(r.get("interval") or interval + 5)
+            continue
+        if err == "expired_token":
+            die("the code expired before you entered it", 1, "run `talos login` again")
+        if err == "access_denied":
+            die("the login was cancelled on GitHub", 1, "run `talos login` again to retry")
+        die("GitHub said %s" % (err or "nothing useful"), 1,
+            r.get("error_description") or "run `talos login` again")
+    die("the code expired before you entered it", 1, "run `talos login` again")
+
+
 def cmd_login(argv):
     pos, kv = opts(argv, set())
-    if not pos:
-        die("usage: talos login <token> [--url https://talos.example]", 2)
-    c = load_config()
-    c["token"] = pos[0]
     if kv.get("url"):
-        c["url"] = kv["url"]
-    if not c.get("url") and DEFAULT_URL:
-        c["url"] = DEFAULT_URL
-    if not c.get("url"):
-        die("first login needs --url <desk url>", 2, "it is in the onboarding message")
+        os.environ["TALOS_URL"] = kv["url"]
+    url = resolve_url(refresh=True)
+    if not url:
+        die("no desk url: the pointer file did not answer", 1, "talos login --url <desk url>")
+    c = load_config()
+    if pos:
+        c["token"] = pos[0]
+    else:
+        c["token"] = post_login(url, device_login(url, bool(kv.get("json"))))["token"]
+    c["url"] = url
     save_config(c)
+    os.environ["TALOS_URL"], os.environ["TALOS_TOKEN"] = url, c["token"]
     try:
         me = request("GET", "/me")
     except Desk as ex:
         fail(ex, "login")
-    print("logged in as @%s at %s; %d asks left today"
-          % (me["handle"], c["url"], me["asks_per_day"] - me["asks_today"]))
+    print("logged in as @%s" % me["handle"])
+    note("desk %s; %d asks left today" % (url, me["asks_per_day"] - me["asks_today"]))
     refresh_skill(quiet=True)
+
+
+def post_login(url, github_token):
+    try:
+        out = json.loads(open_url("POST", url + "/login/github", {"access_token": github_token},
+                                  timeout=60).read().decode("utf-8", "replace"))
+    except Desk as ex:
+        die(ex.error, EXIT.get(ex.status, 1), ex.hint)
+    if out.get("note"):
+        note(out["note"])
+    return out
 
 
 def cmd_whoami(argv):
@@ -589,12 +710,12 @@ def check(label, ok, detail, fix):
 
 
 def cmd_doctor(argv):
+    url = resolve_url(refresh=True)
     c = load_config()
-    url = os.environ.get("TALOS_URL") or c.get("url") or DEFAULT_URL
     tok = os.environ.get("TALOS_TOKEN") or c.get("token")
-    good = check("config file", os.path.isfile(CONFIG), CONFIG, "talos login <token> --url <desk url>")
-    good &= check("desk url", bool(url), url or "unset", "talos login <token> --url <desk url>")
-    good &= check("token", bool(tok), "present" if tok else "missing", "talos login <token>")
+    good = check("config file", os.path.isfile(CONFIG), CONFIG, "talos login")
+    good &= check("desk url", bool(url), url or "unset", "talos login --url <desk url>")
+    good &= check("token", bool(tok), "present" if tok else "missing", "talos login")
     health, minv = None, None
     if url:
         try:
@@ -613,7 +734,7 @@ def cmd_doctor(argv):
         except (Desk, SystemExit) as ex:
             note("talos: /me said %s" % ex)
     good &= check("token valid", bool(who), ("@" + who["handle"]) if who else "rejected",
-                  "ask @SHAcollision for a new token")
+                  "talos login")
     installed = [p for p in SKILL_PATHS if os.path.isfile(p)]
     good &= check("skill installed", bool(installed), ", ".join(installed) or "nowhere", "talos setup")
     mcp_ok = "[mcp_servers.talos]" in open_or_empty(os.path.expanduser("~/.codex/config.toml"))
@@ -634,8 +755,8 @@ def cmd_doctor(argv):
 
 def cmd_mcp(argv):
     c = load_config()
-    url = os.environ.get("TALOS_URL") or c.get("url") or DEFAULT_URL
     tok = os.environ.get("TALOS_TOKEN") or c.get("token")
+    url = resolve_url() if tok else ""
     out = sys.stdout
     for line in sys.stdin:
         line = line.strip()
@@ -649,7 +770,7 @@ def cmd_mcp(argv):
         if not url or not tok:
             if mid is not None:
                 out.write(json.dumps({"jsonrpc": "2.0", "id": mid, "error": {
-                    "code": -32000, "message": "talos is not logged in: run `talos login <token>`"}}) + "\n")
+                    "code": -32000, "message": "talos is not logged in: run `talos login` in a terminal"}}) + "\n")
                 out.flush()
             continue
         req = urllib.request.Request(url.rstrip("/") + "/mcp", data=json.dumps(msg).encode(),
@@ -726,6 +847,8 @@ This page is a snapshot of the sheet the desk serves; `talos setup` and
 `talos login` replace it with the live one.
 
 Rule of thumb: `talos find` first, it is free and instant. Then `talos skills` for what the team already wrote down. `talos ask` only when the answer needs Talos's own memory or judgement, and `talos delegate` when the job takes minutes and you do not want to wait.
+
+Not logged in? Run `talos login`, open the GitHub device prompt it prints and enter the code. The desk checks you are in the pubky org and gives you a token of its own; logging in again rotates that token and the old one stops working. Someone outside the org uses `talos login <token>` with a token from @SHAcollision.
 
 ## Read verbs: free, seconds, no model
 

@@ -10,4 +10,4 @@ chmod +x "$BIN/talos.tmp" && mv "$BIN/talos.tmp" "$BIN/talos"
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "add $BIN to your PATH (e.g. export PATH=\"$BIN:\$PATH\" in your shell rc)";; esac
 "$BIN/talos" setup
 echo
-echo "installed $("$BIN/talos" --version). Next: talos login <token>   (ask @SHAcollision for a token)"
+echo "installed $("$BIN/talos" --version). Next: run talos login   (it prints a GitHub prompt: open the page, type the code)"
