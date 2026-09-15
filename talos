@@ -1034,6 +1034,9 @@ def cmd_doctor(argv):
 
 # ---------- MCP over stdio: every request goes to the desk's /mcp as is ----------
 
+MCP_MAX = 8 * 1024 * 1024
+
+
 def cmd_mcp(argv):
     c = load_config()
     tok = os.environ.get("TALOS_TOKEN") or c.get("token")
@@ -1060,10 +1063,19 @@ def cmd_mcp(argv):
                                               "User-Agent": "talos-cli/" + VERSION})
         try:
             r = urllib.request.urlopen(req, timeout=20 * 60)
-            payload = r.read().decode("utf-8", "replace")
+            payload = r.read(MCP_MAX).decode("utf-8", "replace")
             if r.getcode() == 202 or mid is None:
                 continue
-            out.write(payload + "\n")
+            # one request, one reply: a body carrying a second frame would reach the agent as the
+            # answer to something it never asked
+            try:
+                reply = json.loads(payload)
+            except ValueError:
+                reply = None
+            if not isinstance(reply, dict) or reply.get("id") != mid:
+                reply = {"jsonrpc": "2.0", "id": mid, "error": {
+                    "code": -32000, "message": "the desk did not answer this request"}}
+            out.write(json.dumps(reply) + "\n")
             out.flush()
         except urllib.error.HTTPError as e:
             try:
