@@ -33,6 +33,7 @@ Single file, Python 3.8+, standard library only. Source: https://github.com/pubk
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -188,14 +189,23 @@ def save_config(c):
     os.chmod(CONFIG, 0o600)
 
 
+CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def clean(text):
+    """What the desk sends is whatever someone wrote in Slack, in a PR title or in a doc, and it
+    lands in a terminal: escape sequences there repaint the screen and hide lines."""
+    return CONTROL.sub("?", str(text))
+
+
 def die(msg, code=1, hint=""):
-    sys.stderr.write("talos: %s%s\n" % (msg, " (%s)" % hint if hint else ""))
+    sys.stderr.write("talos: %s%s\n" % (clean(msg), " (%s)" % clean(hint) if hint else ""))
     sys.exit(code)
 
 
 def note(msg):
     if not QUIET:
-        sys.stderr.write(msg + "\n")
+        sys.stderr.write(clean(msg) + "\n")
 
 
 def health(url):
@@ -434,13 +444,13 @@ def cmd_verb(v, argv):
 
 def render(out, kv):
     if out.get("confirmed") is False:
-        print(str(out.get("preview", "")).rstrip())
+        print(clean(out.get("preview", "")).rstrip())
         note("add --yes to do it")
         sys.exit(5)
     if kv.get("json"):
         print(json.dumps(out, indent=1))
     else:
-        print(str(out.get("text", "")).rstrip())
+        print(clean(out.get("text", "")).rstrip())
 
 
 def read_source(path):
@@ -510,7 +520,7 @@ def cmd_ask(body, kv):
             if ev == "run.started":
                 note("talos is on it (thread %s)" % p.get("thread"))
             elif ev == "tool.started":
-                note("  " + str(p.get("tool")))
+                note("  " + str(p.get("tool")))  # note() strips control characters
             elif ev in ("run.completed", "run.failed"):
                 final = (ev, p)
                 break
@@ -522,7 +532,7 @@ def cmd_ask(body, kv):
     if kv.get("json"):
         print(json.dumps(p, indent=1))
     else:
-        print(str(p.get("answer", "")).rstrip())
+        print(clean(p.get("answer", "")).rstrip())
         sys.stdout.flush()
         note("\n(thread %s, %ss; follow up with --thread %s)" % (p.get("thread"), p.get("seconds"), p.get("thread")))
 
@@ -645,7 +655,7 @@ def cmd_skill(argv):
         r = request("GET", "/skill", stream=True)
     except Desk as ex:
         fail(ex, "skill")
-    print(r.read().decode("utf-8", "replace").rstrip())
+    print(clean(r.read().decode("utf-8", "replace")).rstrip())
 
 
 def cmd_verbs(argv):
@@ -657,7 +667,7 @@ def cmd_verbs(argv):
         print(json.dumps(out, indent=1))
         return
     for v in out["verbs"]:
-        print("%-16s %-6s %s" % (v["name"], v["tier"], v["usage"]))
+        print(clean("%-16s %-6s %s" % (v["name"], v["tier"], v["usage"])))
 
 
 FRONTMATTER = ('---\nname: talos\ndescription: "Talos is the pubky team\'s agent. Use it to search team history '
