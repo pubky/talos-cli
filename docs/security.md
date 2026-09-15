@@ -109,6 +109,11 @@ read, and writes each harness's skill file. It backs every one of those up befor
 interrupted run leaves no half file, and only ever replaces its own block or key. It does not read
 what else is in those files.
 
+One file is the exception, on purpose: `~/.claude.json`. Claude Code's own `claude mcp add -s user`
+makes that edit, not this client, and that file holds far more than MCP servers, so a copy of it
+taken at install time is a worse thing to restore than the edit is to undo. Undo it with
+`claude mcp remove -s user talos`.
+
 **The token on a command line.** `talos login` with no argument asks for the token at a prompt
 (or reads one line of stdin when something pipes it in), so nothing lands in argv or the shell
 history. `talos login <token>` still works for scripts that already hold one, and that form is the

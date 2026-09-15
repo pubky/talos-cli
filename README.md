@@ -93,6 +93,9 @@ A run that died between the two markers leaves a `talos:begin` with no `talos:en
 `talos setup` replaces everything from that marker to the end of the file with a whole block, after
 backing the file up, so a half write is repaired rather than doubled.
 
+The one file setup does not back up is `~/.claude.json`: Claude Code's own `claude mcp add` makes
+that edit, and `claude mcp remove -s user talos` undoes it.
+
 Aider has no MCP support, so there it is `talos` as a plain shell command plus the sheet in a file
 you point aider at, for example `aider --read ~/.claude/skills/talos/SKILL.md`.
 
