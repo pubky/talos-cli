@@ -223,7 +223,19 @@ def pointer_url():
     except Exception:
         return DEFAULT_URL
     line = raw.strip().splitlines()[0].strip() if raw.strip() else ""
-    return line if line.startswith("http") else DEFAULT_URL
+    if not line.startswith("http"):
+        return DEFAULT_URL  # the file is broken, and the built-in address is the safe answer
+    if not pointable(line):
+        note("talos: the pointer file names %s, which is not an https desk; staying where you are" % line)
+        return ""
+    return line
+
+
+def pointable(url):
+    """One line in a public file moves the whole team, and their tokens go to wherever it says, so
+    over the network it has to be https. Loopback is for whoever is testing a desk of their own."""
+    host = url.split("//", 1)[-1].split("/")[0].split(":")[0]
+    return url.startswith("https://") or (url.startswith("http://") and host in ("127.0.0.1", "localhost"))
 
 
 def resolve_url(refresh=False):
