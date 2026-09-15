@@ -655,7 +655,7 @@ def cmd_skill(argv):
         r = request("GET", "/skill", stream=True)
     except Desk as ex:
         fail(ex, "skill")
-    print(clean(r.read().decode("utf-8", "replace")).rstrip())
+    print(clean(r.read(SHEET_MAX).decode("utf-8", "replace")).rstrip())
 
 
 def cmd_verbs(argv):
@@ -677,13 +677,35 @@ FRONTMATTER = ('---\nname: talos\ndescription: "Talos is the pubky team\'s agent
                'review, file an issue."\n---\n\n')
 
 
+SHEET_MAX = 64 * 1024
+SHEET_HEAD = "# Talos from the terminal"
+
+
+def known_sheet(body):
+    """The sheet is installed where every harness reads it as instructions, so a desk that is not
+    the desk cannot get a shell command or a payload past here: what the desk serves is headings,
+    prose, and fenced blocks holding nothing but `talos` command lines."""
+    if not body or len(body) > SHEET_MAX or not body.lstrip().startswith(SHEET_HEAD):
+        return False
+    fenced = False
+    for line in body.splitlines():
+        if line.startswith("```"):
+            fenced = not fenced
+        elif fenced and line.strip() and not line.startswith("talos "):
+            return False
+    return not fenced
+
+
 def skill_text():
     """The desk serves the sheet; the copy embedded here is only a bootstrap."""
     try:
-        body = request("GET", "/skill", stream=True, timeout=30).read().decode("utf-8", "replace")
+        body = request("GET", "/skill", stream=True, timeout=30).read(SHEET_MAX + 1).decode("utf-8", "replace")
     except (Desk, SystemExit, IOError, OSError):
         body = None
-    return FRONTMATTER + (body or SKILL_MD), bool(body)
+    if body is not None and not known_sheet(body):
+        note("talos: the desk served a sheet this client does not recognise, keeping the built-in one")
+        body = None
+    return FRONTMATTER + clean(body or SKILL_MD), bool(body)
 
 
 # ---------- the harnesses talos registers itself with ----------
