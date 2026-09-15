@@ -7,14 +7,13 @@ Give your agent this one line and it does the rest:
 
 > Install the talos CLI with `curl -fsSL https://raw.githubusercontent.com/pubky/talos-cli/main/install.sh | sh`, run `talos login` and complete the GitHub device prompt it prints, then `talos whoami`; from now on use talos for anything about this team (`talos` lists the verbs).
 
-Until GitHub device login is switched on, the line is the same with a token @SHAcollision sends
-you by DM in place of the device prompt:
+Until GitHub device login is switched on, that same line ends with a token @SHAcollision sends you
+by DM: `talos login` asks for it at a prompt, you paste it there. It never goes on a command line,
+where the shell history and every process listing on the machine would have it.
 
-> Install the talos CLI with `curl -fsSL https://raw.githubusercontent.com/pubky/talos-cli/main/install.sh | sh`, run `talos login <token>`, then `talos whoami`; from now on use talos for anything about this team (`talos` lists the verbs).
-
-No token to paste and no URL to look up: `talos login` prints an "Open ... and enter code ..."
-line, you open that page, type the code, and the desk checks your pubky org membership and gives
-you a token of its own. Logging in again rotates it, so the old one stops working.
+No URL to look up either: `talos login` prints an "Open ... and enter code ..." line, you open that
+page, type the code, and the desk checks your pubky org membership and gives you a token of its own.
+Logging in again rotates it, so the old one stops working.
 
 ```
 talos                                   every verb, by tier
@@ -43,11 +42,24 @@ install; the agent runs `python3 ${CLAUDE_PLUGIN_ROOT}/bin/talos login` when it 
 in.
 
 `talos setup` reruns the registration and refreshes the skill from the desk; `talos doctor`
-checks the whole chain, lists every harness it found and says what to fix.
+checks the whole chain, lists every harness it found and says what to fix. `talos update` fetches
+the current release, checks its sha256 and replaces the file it is running from, keeping the old one
+as `talos.prev`; `talos rollback` puts that one back.
 
-That install line follows `main`, so what you get is whatever `main` holds when you run it. To pin
-it, put a commit SHA in place of `main` in both URLs. What the client trusts, what it refuses from
-the desk, and where your token lives: [docs/security.md](docs/security.md).
+### What the install line pins
+
+`install.sh` carries the version it installs and the sha256 of that version's `talos`. It downloads
+`talos` from that release tag, checks the checksum, and installs nothing at all if it does not
+match, so nothing unverified is ever executed or moved into place. The URL above says `main`
+because `install.sh` is what does the pinning. To pin the installer too, take it from the tag:
+
+```
+curl -fsSL https://raw.githubusercontent.com/pubky/talos-cli/v0.3.1/install.sh | sh
+```
+
+talos 0.3.1 is sha256 `0000000000000000000000000000000000000000000000000000000000000000`, which is
+what `sha256sum ~/.local/bin/talos` prints after the install. What the client trusts, what it
+refuses from the desk, and where your token lives: [docs/security.md](docs/security.md).
 
 ### What setup writes, and where
 
@@ -73,23 +85,37 @@ goes in as a global skill instead. Windsurf caps that file at 6000 characters an
 
 Nothing is ever overwritten: JSON files keep their own indentation and every other key, the Codex
 block is appended only when it is absent, and the block in a rules file sits between
-`<!-- talos:begin -->` and `<!-- talos:end -->` markers so the rest of the file is yours. Any file
-setup modifies is copied once to `<file>.bak-talos` first. Running it again changes nothing.
+`<!-- talos:begin -->` and `<!-- talos:end -->` markers so the rest of the file is yours. Every file
+setup modifies, skill files included, is copied to `<file>.bak-talos` the first time, and to
+`~/.config/talos/backups/<file>.<timestamp>` after that. Running it again changes nothing.
+
+A run that died between the two markers leaves a `talos:begin` with no `talos:end`. The next
+`talos setup` replaces everything from that marker to the end of the file with a whole block, after
+backing the file up, so a half write is repaired rather than doubled.
 
 Aider has no MCP support, so there it is `talos` as a plain shell command plus the sheet in a file
 you point aider at, for example `aider --read ~/.claude/skills/talos/SKILL.md`.
 
 ### If you are not in the pubky GitHub org
 
-Device login only works for org members. Ask @SHAcollision for a token and run
-`talos login <token>`. Everything else is the same.
+Device login only works for org members. Ask @SHAcollision for a token, run `talos login --token`
+and paste it at the prompt. Everything else is the same. Scripts and CI that already hold a token
+can pass it as `talos login <token>` or in `TALOS_TOKEN`, but on a keyboard use the prompt: an
+argument is in the shell history and in every process listing on the machine.
 
 ## Where the desk lives
 
-The CLI takes the desk URL from `--url`, then `TALOS_URL`, then your stored config, then
-[`desk-url.txt`](desk-url.txt) in this repo. Moving the desk to a new address is one commit to
-that file: `talos login` and `talos doctor` notice the stored one stopped answering and pick the
-new address up on their own.
+The CLI takes the desk URL from `--url` (a global flag: every verb of that run uses it), then
+`TALOS_URL`, then your stored config, then the built-in address. Moving the desk to a new address is
+one commit to [`desk-url.txt`](desk-url.txt) in this repo: `talos login` and `talos doctor` read
+that file when the stored desk stops answering and pick the new address up. No other verb reads it.
+
+Two limits on what that one line can do. It may only name a host under `pubky.app`, over https, or
+a loopback address for whoever is testing a desk of their own; anything else is ignored and the
+stored address is kept. And a desk at a new address starts with nothing: the stored token is dropped
+and `talos login` has to run again, so one commit to a public file can move where you work but
+cannot forward your credentials anywhere. `TALOS_POINTER_URL` points the client at a different
+pointer file, which is how the selftest drives this.
 
 ## Using it from an agent
 
@@ -106,6 +132,11 @@ judgement; `review` after opening a PR. The same verbs are MCP tools (`talos_fin
 - `talos delegate --key <k>` is idempotent: a retry with the same key returns the same run.
 - The desk token lives in `~/.config/talos/config.json` (mode 0600); `TALOS_TOKEN` and `TALOS_URL`
   override it (CI, containers). The GitHub token from the device flow is never stored.
+- `talos update` installs the release `install.sh` pins, checksum first, and keeps the file it
+  replaced as `talos.prev`. `talos rollback` (or `mv ~/.local/bin/talos.prev ~/.local/bin/talos`)
+  goes back to it.
+- The desk names the oldest client it answers correctly. Below it every verb stops with one line
+  saying to run `talos update`, in the terminal and as the MCP reply alike.
 - Every write and every agent turn is logged with your handle and echoed to the team's ops
   channel. Do not paste secrets into an ask.
 - An ask is a real Talos turn with his usual tools and guards, the same trust as mentioning him
@@ -115,11 +146,12 @@ judgement; `review` after opening a PR. The same verbs are MCP tools (`talos_fin
 
 ```
 talos                       the CLI, single file, Python 3.8+ standard library only
-install.sh                  curl | sh installer
+install.sh                  curl | sh installer; it pins the release version and its sha256
 desk-url.txt                where the desk is today, one line
 docs/security.md            what the client trusts, what it refuses, what it accepts
 scripts/selftest.sh         every CLI path against a stub desk, plus harness registration in a fake home
-scripts/sync-plugin.sh      copy the CLI into the plugin and regenerate its skill
+scripts/sync-plugin.sh      copy the CLI into the plugin and regenerate its skill and manifest
+scripts/release.sh          bump the version, sync, pin the checksum, commit and tag
 plugins/talos/              Claude Code plugin: the CLI, the skill, the MCP server config
   bin/talos                 a copy of the CLI, kept identical by sync-plugin.sh
   skills/talos/SKILL.md     a snapshot of the sheet the desk serves
