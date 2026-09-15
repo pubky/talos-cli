@@ -913,16 +913,44 @@ def ensure_dir(path):
 
 
 def write_file(path, text):
+    """Back up what is there, then swap the new text in by rename, so an interrupted write cannot
+    leave a half file where a harness reads its instructions."""
     ensure_dir(path)
-    with open(path, "w") as fh:
-        fh.write(text)
+    if os.path.isfile(path) and open_or_empty(path) == text:
+        return False
+    backup_once(path)
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".talos-")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    return True
+
+
+BACKED = set()
 
 
 def backup_once(path):
-    """One backup per file, ever, so a second setup cannot bury the pre-talos original."""
+    """The first copy of a file keeps its name, so `<file>.bak-talos` is always the pre-talos
+    original; later runs stamp theirs, so no change this client makes is the only copy."""
+    if path in BACKED or not os.path.isfile(path):
+        BACKED.add(path)
+        return
+    BACKED.add(path)
     bak = path + ".bak-talos"
-    if os.path.isfile(path) and not os.path.exists(bak):
+    if not os.path.exists(bak):
         shutil.copy2(path, bak)
+        return
+    if not os.path.isdir(BACKUP_DIR):
+        os.makedirs(BACKUP_DIR, 0o700)
+    flat = path.replace(os.sep, "-").strip("-")
+    shutil.copy2(path, os.path.join(BACKUP_DIR, "%s.%s" % (flat, time.strftime("%Y%m%dT%H%M%S"))))
 
 
 def json_indent(text):
@@ -953,11 +981,7 @@ def register_json(path, key, entry):
     state = "updated in " if MANAGED in section else "added to "
     section[MANAGED] = entry
     data[key] = section
-    backup_once(path)
-    ensure_dir(path)
-    with open(path, "w") as fh:
-        json.dump(data, fh, indent=json_indent(text))
-        fh.write("\n")
+    write_file(path, json.dumps(data, indent=json_indent(text)) + "\n")
     return state + path
 
 
@@ -986,14 +1010,16 @@ def register_block(path, block):
     """A marked block inside a file the user also writes in: replace ours, leave the rest alone."""
     text = open_or_empty(path)
     new = BLOCK_BEGIN + "\n" + block + "\n" + BLOCK_END
-    if BLOCK_BEGIN in text and BLOCK_END in text:
+    if BLOCK_BEGIN in text:
+        # a run that died between the two markers leaves a begin with no end: everything from it to
+        # the end of the file is that half-written block, and replacing it is the recovery
         head, rest = text.split(BLOCK_BEGIN, 1)
-        out = head + new + rest.split(BLOCK_END, 1)[1]
+        tail = rest.split(BLOCK_END, 1)[1] if BLOCK_END in rest else "\n"
+        out = head + new + tail
     else:
         out = (text.rstrip() + "\n\n" if text.strip() else "") + new + "\n"
     if out == text:
         return "already in " + path
-    backup_once(path)
     write_file(path, out)
     return "written to " + path
 
