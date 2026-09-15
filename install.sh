@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installs the talos CLI into ~/.local/bin and registers it with Claude Code and Codex.
+# Installs the talos CLI into ~/.local/bin and registers it with every coding harness on the machine.
 #   curl -fsSL https://raw.githubusercontent.com/pubky/talos-cli/main/install.sh | sh
 set -e
 RAW="https://raw.githubusercontent.com/pubky/talos-cli/main/talos"

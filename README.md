@@ -33,9 +33,9 @@ talos login
 talos whoami
 ```
 
-The installer also writes the skill for Claude Code and Codex and registers the MCP server, so
-your agent already knows when to use Talos. Tell it "use talos for anything about the team" and
-it takes it from there.
+The installer also registers the MCP server and writes the skill for every coding harness it
+finds on the machine, so your agent already knows when to use Talos. Tell it "use talos for
+anything about the team" and it takes it from there.
 
 Claude Code users can take the plugin route instead: `/plugin marketplace add pubky/talos-cli`,
 then `/plugin install talos`. The plugin carries its own copy of the CLI, so there is nothing to
@@ -43,7 +43,37 @@ install; the agent runs `python3 ${CLAUDE_PLUGIN_ROOT}/bin/talos login` when it 
 in.
 
 `talos setup` reruns the registration and refreshes the skill from the desk; `talos doctor`
-checks the whole chain and says what to fix.
+checks the whole chain, lists every harness it found and says what to fix.
+
+### What setup writes, and where
+
+A harness counts as present when its config directory or its binary is there, and only a present
+one is touched. `talos setup --harness <name>` writes one anyway, installed or not. Claude Code
+and Codex are the exception: their skill file and the Codex block go in either way, which is what
+the installer did before the other harnesses existed.
+
+| harness | MCP server | the sheet | from |
+|---|---|---|---|
+| Claude Code | `claude mcp add -s user talos -- talos mcp`, so `~/.claude.json` | `~/.claude/skills/talos/SKILL.md` | [mcp](https://code.claude.com/docs/en/mcp) |
+| Codex | `[mcp_servers.talos]` appended to `~/.codex/config.toml` | `~/.codex/skills/talos/SKILL.md` | [mcp](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) |
+| Cursor | `mcpServers.talos` in `~/.cursor/mcp.json` | `~/.cursor/skills/talos/SKILL.md` | [mcp](https://cursor.com/docs/context/mcp), [skills](https://cursor.com/docs/skills) |
+| Windsurf | `mcpServers.talos` in `~/.codeium/windsurf/mcp_config.json` | a marked block in `~/.codeium/windsurf/memories/global_rules.md` | [mcp](https://docs.devin.ai/desktop/cascade/mcp), [rules](https://docs.devin.ai/desktop/cascade/memories) |
+| Gemini CLI | `mcpServers.talos` in `~/.gemini/settings.json` | a marked block in `~/.gemini/GEMINI.md` | [mcp](https://google-gemini.github.io/gemini-cli/docs/tools/mcp-server.html), [context](https://geminicli.com/docs/cli/gemini-md/) |
+| opencode | `mcp.talos` in `~/.config/opencode/opencode.json` | `~/.config/opencode/skills/talos/SKILL.md` | [mcp](https://opencode.ai/docs/mcp-servers/), [skills](https://opencode.ai/docs/skills/) |
+| aider, anything without MCP | `talos setup --print-mcp` prints the block to paste | `talos setup --print-rules` prints the sheet | |
+
+Cursor has no global rules file on disk (user rules live in its settings window), so the sheet
+goes in as a global skill instead. Windsurf caps that file at 6000 characters and Gemini's
+`GEMINI.md` is the user's own memory file, so those two get a short block that points at
+`talos skill` rather than the whole sheet.
+
+Nothing is ever overwritten: JSON files keep their own indentation and every other key, the Codex
+block is appended only when it is absent, and the block in a rules file sits between
+`<!-- talos:begin -->` and `<!-- talos:end -->` markers so the rest of the file is yours. Any file
+setup modifies is copied once to `<file>.bak-talos` first. Running it again changes nothing.
+
+Aider has no MCP support, so there it is `talos` as a plain shell command plus the sheet in a file
+you point aider at, for example `aider --read ~/.claude/skills/talos/SKILL.md`.
 
 ### If you are not in the pubky GitHub org
 
@@ -59,7 +89,7 @@ new address up on their own.
 
 ## Using it from an agent
 
-The skill file tells Claude Code and Codex when to reach for Talos without being asked: `find`
+The skill file tells your agent when to reach for Talos without being asked: `find`
 for any "where did we discuss", "did anyone report", "who owns", "what did the call conclude";
 `skills` for what the team already wrote down; `ask` only when the answer needs Talos's memory or
 judgement; `review` after opening a PR. The same verbs are MCP tools (`talos_find`, `talos_who`,
@@ -83,7 +113,7 @@ judgement; `review` after opening a PR. The same verbs are MCP tools (`talos_fin
 talos                       the CLI, single file, Python 3.8+ standard library only
 install.sh                  curl | sh installer
 desk-url.txt                where the desk is today, one line
-scripts/selftest.sh         every CLI path against a stub desk, including the v0.1 fallback
+scripts/selftest.sh         every CLI path against a stub desk, plus harness registration in a fake home
 scripts/sync-plugin.sh      copy the CLI into the plugin and regenerate its skill
 plugins/talos/              Claude Code plugin: the CLI, the skill, the MCP server config
   bin/talos                 a copy of the CLI, kept identical by sync-plugin.sh
