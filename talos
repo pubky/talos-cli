@@ -15,6 +15,16 @@ The desk URL comes from --url, then TALOS_URL, then the stored config, then the 
 https://raw.githubusercontent.com/pubky/talos-cli/main/desk-url.txt. Moving the desk is one commit
 to that file; `talos login` and `talos doctor` pick the new address up on their own.
 
+## When something is broken
+
+If a verb errors, returns wrong data, or Talos misbehaves, the fix is a pull request, not a workaround:
+the client is the public repo `pubky/talos-cli` (the `talos` file, one Python file), the server and
+Talos's skills are `pubky/talos-agent` (`skills/talos/talos-desk/scripts/talos-desk.py`, `skills/**`,
+`AGENTS.md`), which every org member can push branches to. Clone it, fix it on a branch named
+`<handle>/<what>`, open the PR with `gh pr create --fill`, and mention @SHAcollision in it; a desk
+restart follows the merge. Prefer a short PR with the failing command and its output in the body over
+an issue; file `talos issue pubky/talos-agent "..."` only when you cannot fix it yourself.
+
 Exit codes: 0 ok, 1 error, 2 usage, 3 over budget, 4 not logged in or token revoked, 5 needs --yes,
 6 not found, 7 refused by a Talos rule.
 Single file, Python 3.8+, standard library only. Source: https://github.com/pubky/talos-cli
