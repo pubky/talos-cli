@@ -566,7 +566,7 @@ def device_login(url, as_json):
         time.sleep(interval)
         r = post_form(GITHUB_OAUTH + "/login/oauth/access_token",
                       {"client_id": cfg["github_client_id"], "device_code": start["device_code"],
-                       "grant_type": "urn:ietf:params:oauth:grant-type:device_flow"})
+                       "grant_type": "urn:ietf:params:oauth:grant-type:device_code"})
         err = r.get("error")
         if not err and r.get("access_token"):
             return r["access_token"]
