@@ -10,7 +10,7 @@ This page is a snapshot of the sheet the desk serves; `talos setup` and
 
 Rule of thumb: `talos find` first, it is free and instant. Then `talos skills` for what the team already wrote down. `talos ask` only when the answer needs Talos's own memory or judgement, and `talos delegate` when the job takes minutes and you do not want to wait.
 
-Not logged in? Run `talos login`, open the GitHub device prompt it prints and enter the code. The desk checks you are in the pubky org and gives you a token of its own; logging in again rotates that token and the old one stops working. Someone outside the org uses `talos login <token>` with a token from @SHAcollision.
+Not logged in? Run `talos login`, open the GitHub device prompt it prints and enter the code. The desk checks you are in the pubky org and gives you a token of its own; logging in again rotates that token and the old one stops working. Someone outside the org runs `talos login --token` and pastes the token @SHAcollision sent them; the token is never typed on a command line.
 
 ## Read verbs: free, seconds, no model
 

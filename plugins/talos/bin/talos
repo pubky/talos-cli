@@ -3,19 +3,22 @@
 
   talos                      list every verb by tier      talos <verb> --help   usage and flags
   talos login                                             log in with your GitHub account (device prompt)
-  talos login <token> [--url https://...]                 log in with a token instead (people outside the org)
+  talos login --token                                     log in by pasting a token (people outside the org)
   talos doctor                                            check config, desk, token, skill, MCP, version
   talos setup                                             register the skill and MCP server with every harness found
   talos setup --harness cursor                            one harness only, installed or not
   talos setup --print-mcp | --print-rules                 the MCP block and the sheet, for a harness you paste by hand
+  talos update                                            fetch the pinned release, verify its checksum, replace this file
+  talos rollback                                          put the copy update kept back in place
   talos mcp                                               stdio MCP server (what Claude Code and Codex run)
 
 Global flags: --json (the desk's JSON on stdout), --yes (do it, for write verbs), --url, --quiet.
-Environment: TALOS_TOKEN, TALOS_URL.
+Environment: TALOS_TOKEN, TALOS_URL, TALOS_POINTER_URL, TALOS_REPO_RAW.
 
 The desk URL comes from --url, then TALOS_URL, then the stored config, then the pointer file at
-https://raw.githubusercontent.com/pubky/talos-cli/main/desk-url.txt. Moving the desk is one commit
-to that file; `talos login` and `talos doctor` pick the new address up on their own.
+https://raw.githubusercontent.com/pubky/talos-cli/main/desk-url.txt, read by `talos login` and
+`talos doctor` only. That file may only move the desk to pubky.app or to loopback, and a desk at a
+new address starts with no token: the client drops the stored one and asks you to log in again.
 
 ## When something is broken
 
@@ -31,12 +34,15 @@ Exit codes: 0 ok, 1 error, 2 usage, 3 over budget, 4 not logged in or token revo
 6 not found, 7 refused by a Talos rule.
 Single file, Python 3.8+, standard library only. Source: https://github.com/pubky/talos-cli
 """
+import getpass
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -45,13 +51,28 @@ import urllib.request
 VERSION = "0.3.1"
 CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "talos")
 CONFIG = os.path.join(CONFIG_DIR, "config.json")
+BACKUP_DIR = os.path.join(CONFIG_DIR, "backups")
 SKILL_PATHS = [os.path.expanduser("~/.claude/skills/talos/SKILL.md"),
                os.path.expanduser("~/.codex/skills/talos/SKILL.md")]
 
 # Where the desk lives when nobody said. One line, one commit to move the whole team.
 DEFAULT_URL = "https://talos-desk.pubky.app"   # the pointer file overrides this when the desk moves
-POINTER_URL = os.environ.get("TALOS_POINTER_URL") or "https://raw.githubusercontent.com/pubky/talos-cli/main/desk-url.txt"
+REPO_RAW = (os.environ.get("TALOS_REPO_RAW") or "https://raw.githubusercontent.com/pubky/talos-cli").rstrip("/")
+POINTER_URL = os.environ.get("TALOS_POINTER_URL") or REPO_RAW + "/main/desk-url.txt"
+INSTALLER_URL = REPO_RAW + "/main/install.sh"
 GITHUB_OAUTH = os.environ.get("TALOS_GITHUB_OAUTH") or "https://github.com"
+
+# The pointer file is public and unauthenticated, so the hosts it may name are pinned in the client
+# the user checksummed at install time. Loopback is for whoever is testing a desk of their own.
+DESK_HOSTS = ("pubky.app",)
+LOOPBACK = ("127.0.0.1", "::1", "localhost")
+
+# Nothing the desk, GitHub or the repo sends is read past these: a body with no end is a body that
+# fills this machine's memory.
+JSON_MAX = 1024 * 1024
+STREAM_MAX = 8 * 1024 * 1024
+POINTER_MAX = 1024
+PAYLOAD_MAX = 4 * 1024 * 1024
 
 # Exit codes by HTTP status. The desk picks the status, so the two stay in step.
 EXIT = {400: 2, 401: 4, 403: 4, 404: 6, 409: 7, 429: 3}
@@ -208,10 +229,27 @@ def note(msg):
         sys.stderr.write(clean(msg) + "\n")
 
 
+def read_capped(r, cap, what="the desk"):
+    """A response with no end is a response that fills this machine's memory."""
+    body = r.read(cap + 1)
+    if len(body) > cap:
+        die("%s sent more than %d bytes" % (what, cap), 1,
+            "that is not an answer this client will read; tell @SHAcollision")
+    return body.decode("utf-8", "replace")
+
+
+def read_json(r, what="the desk"):
+    try:
+        return json.loads(read_capped(r, JSON_MAX, what))
+    except ValueError:
+        die("%s answered something that is not JSON" % what, 1, "try again, or check `talos doctor`")
+
+
 def health(url):
     try:
         r = urllib.request.urlopen(url.rstrip("/") + "/health", timeout=15)
-        return json.loads(r.read().decode("utf-8", "replace"))
+        body = r.read(JSON_MAX + 1)
+        return None if len(body) > JSON_MAX else json.loads(body.decode("utf-8", "replace"))
     except Exception:
         return None
 
@@ -219,28 +257,55 @@ def health(url):
 def pointer_url():
     """One line in the repo says where the desk is today, so an instruction never carries a URL."""
     try:
-        raw = urllib.request.urlopen(POINTER_URL, timeout=15).read(500).decode("utf-8", "replace")
+        raw = urllib.request.urlopen(POINTER_URL, timeout=15).read(POINTER_MAX).decode("utf-8", "replace")
     except Exception:
         return DEFAULT_URL
     line = raw.strip().splitlines()[0].strip() if raw.strip() else ""
     if not line.startswith("http"):
         return DEFAULT_URL  # the file is broken, and the built-in address is the safe answer
     if not pointable(line):
-        note("talos: the pointer file names %s, which is not an https desk; staying where you are" % line)
+        note("talos: the pointer file names %s, which is not a desk this client may move to (%s or "
+             "loopback); staying where you are" % (line, ", ".join(DESK_HOSTS)))
         return ""
     return line
 
 
 def pointable(url):
-    """One line in a public file moves the whole team, and their tokens go to wherever it says, so
-    over the network it has to be https. Loopback is for whoever is testing a desk of their own."""
-    host = url.split("//", 1)[-1].split("/")[0].split(":")[0]
-    return url.startswith("https://") or (url.startswith("http://") and host in ("127.0.0.1", "localhost"))
+    """One line in a public file moves the whole team, so it may only name a host this client was
+    built to trust, over https. Loopback is for whoever is testing a desk of their own."""
+    p = urllib.parse.urlsplit(url)
+    host = (p.hostname or "").lower()
+    if p.scheme not in ("http", "https") or p.username or p.password or not host:
+        return False
+    if host in LOOPBACK:
+        return True
+    if p.scheme != "https":
+        return False
+    return any(host == h or host.endswith("." + h) for h in DESK_HOSTS)
+
+
+MOVED = ""
+
+
+def adopt(c, old, found):
+    """A desk at a new address is a new desk: it gets none of the credentials the old one issued."""
+    global MOVED
+    c["url"] = found
+    if old:
+        MOVED = found
+        c.pop("token", None)
+    save_config(c)
+    if old:
+        note("talos: the desk moved to %s; that address gets no token until you run `talos login`" % found)
+    else:
+        note("talos: the desk is at %s (from the pointer file)" % found)
+    return found
 
 
 def resolve_url(refresh=False):
-    """--url and TALOS_URL win, then the stored one, then the pointer file. refresh re-reads the
-    pointer when the stored desk stopped answering, so a desk that moved fixes itself."""
+    """--url and TALOS_URL win, then the stored one, then the built-in address. refresh re-reads the
+    pointer file, which is why only login and doctor pass it: a desk that moved fixes itself there,
+    and nothing else on this machine talks to the repo."""
     env = os.environ.get("TALOS_URL")
     if env:
         return env.rstrip("/")
@@ -248,12 +313,11 @@ def resolve_url(refresh=False):
     url = (c.get("url") or "").rstrip("/")
     if url and (not refresh or health(url)):
         return url
+    if not refresh:
+        return url or DEFAULT_URL
     found = pointer_url().rstrip("/")
     if found and found != url and (not url or health(found)):
-        c["url"] = found
-        save_config(c)
-        note("talos: the desk is at %s now (from the pointer file)" % found)
-        return found
+        return adopt(c, url, found)
     return url
 
 
@@ -274,10 +338,23 @@ class Desk(Exception):
 
 
 def version_tuple(v):
+    """None when it is not a version, so an unreadable minimum is never silently satisfied."""
     try:
-        return tuple(int(x) for x in v.split("."))
+        parts = tuple(int(x) for x in str(v).strip().split("."))
     except (ValueError, AttributeError):
-        return (0,)
+        return None
+    return parts or None
+
+
+def min_client(r):
+    """The desk names the oldest client it still answers correctly. Below it, stop: a client that
+    keeps going against a desk it cannot read is how wrong answers get believed."""
+    minv = r.headers.get("X-Talos-Min-Client")
+    want = version_tuple(minv) if minv else None
+    if minv and want is None:
+        note("talos: the desk asks for client %s, which is not a version this client can compare" % clean(minv))
+    elif want and want > version_tuple(VERSION):
+        die("this client is %s and the desk needs %s" % (VERSION, minv), 1, "run `talos update`")
 
 
 def open_url(method, url, body=None, headers=None, timeout=120):
@@ -289,7 +366,7 @@ def open_url(method, url, body=None, headers=None, timeout=120):
         return urllib.request.urlopen(req, timeout=timeout)
     except urllib.error.HTTPError as e:
         try:
-            payload = json.loads(e.read().decode("utf-8", "replace"))
+            payload = json.loads(read_capped(e, JSON_MAX))
         except ValueError:
             payload = {}
         raise Desk(e.code, payload.get("error") or str(e.reason), payload.get("hint", ""), payload.get("code", ""))
@@ -300,10 +377,8 @@ def open_url(method, url, body=None, headers=None, timeout=120):
 def request(method, path, body=None, stream=False, timeout=120):
     url, tok = endpoint()
     r = open_url(method, url + path, body, {"Authorization": "Bearer " + tok}, timeout)
-    minv = r.headers.get("X-Talos-Min-Client")
-    if minv and version_tuple(minv) > version_tuple(VERSION):
-        note("talos: this client is %s, the desk wants %s; rerun install.sh" % (VERSION, minv))
-    return r if stream else json.loads(r.read().decode("utf-8", "replace"))
+    min_client(r)
+    return r if stream else read_json(r)
 
 
 def fail(ex, verb):
@@ -405,7 +480,7 @@ def usage_all():
             if v["tier"] == tier:
                 print("  %-18s %s" % (v["cmd"], v["one"]))
         print("")
-    print("also: login, whoami, doctor, setup, skill, verbs, mcp, help <verb>")
+    print("also: login, whoami, doctor, setup, update, rollback, skill, verbs, mcp, help <verb>")
     print("flags: --json --yes --quiet --url <desk>   env: TALOS_TOKEN TALOS_URL")
 
 
@@ -519,8 +594,14 @@ def cmd_ask(body, kv):
             r = request("POST", "/ask", body, stream=True, timeout=20 * 60)
         else:
             fail(ex, "ask")
-    ev, final = None, None
-    for raw in r:
+    ev, final, total = None, None, 0
+    while True:
+        raw = r.readline(JSON_MAX + 1)
+        if not raw:
+            break
+        total += len(raw)
+        if len(raw) > JSON_MAX or total > STREAM_MAX:
+            die("the desk streamed more than this client will read", 1, "tell @SHAcollision")
         line = raw.decode("utf-8", "replace").rstrip("\n")
         if line.startswith("event:"):
             ev = line[6:].strip()
@@ -558,23 +639,19 @@ def post_form(url, fields, timeout=30):
         "User-Agent": "talos-cli/" + VERSION})
     try:
         r = urllib.request.urlopen(req, timeout=timeout)
-        raw = r.read().decode("utf-8", "replace")
+        raw = read_capped(r, JSON_MAX, "GitHub")
     except urllib.error.HTTPError as e:
-        raw = e.read().decode("utf-8", "replace")
+        raw = read_capped(e, JSON_MAX, "GitHub")
     except urllib.error.URLError as e:
         die("cannot reach GitHub at %s: %s" % (url, e.reason), 1, "check your network and try again")
     try:
         return json.loads(raw)
     except ValueError:
-        die("GitHub answered something that is not JSON", 1, "try again, or use `talos login <token>`")
+        die("GitHub answered something that is not JSON", 1, "try again, or use `talos login --token`")
 
 
-def device_login(url, as_json):
+def device_login(url, cfg, as_json):
     """GitHub's device flow: the user opens a page and types a code, no secret on this machine."""
-    try:
-        cfg = json.loads(open_url("GET", url + "/login/config", timeout=20).read().decode("utf-8", "replace"))
-    except Desk as ex:
-        die(ex.error, EXIT.get(ex.status, 1), ex.hint or "use `talos login <token>` instead")
     start = post_form(GITHUB_OAUTH + "/login/device/code",
                       {"client_id": cfg["github_client_id"], "scope": "read:org"})
     if start.get("error") or not start.get("device_code"):
@@ -609,18 +686,46 @@ def device_login(url, as_json):
     die("the code expired before you entered it", 1, "run `talos login` again")
 
 
+def prompt_token():
+    """A token on the command line is in the shell history and in every process listing, so the
+    token login asks for it here instead."""
+    if not sys.stdin.isatty():
+        tok = sys.stdin.readline().strip()
+    else:
+        try:
+            tok = getpass.getpass("paste your talos token (it is not echoed): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            tok = ""
+    if not tok:
+        die("no token given", 2, "ask @SHAcollision for one, or run `talos login` for the GitHub prompt")
+    return tok
+
+
+def device_or_prompt(url, as_json):
+    """The GitHub device flow when the desk has an OAuth app; a pasted token when it does not."""
+    try:
+        cfg = read_json(open_url("GET", url + "/login/config", timeout=20))
+    except Desk as ex:
+        note("talos: %s" % ex.error)
+        note("talos: paste the token @SHAcollision sent you instead")
+        return prompt_token()
+    return post_login(url, device_login(url, cfg, as_json))["token"]
+
+
 def cmd_login(argv):
-    pos, kv = opts(argv, set())
-    if kv.get("url"):
-        os.environ["TALOS_URL"] = kv["url"]
+    pos, kv = opts(argv, set(["token"]))
     url = resolve_url(refresh=True)
+    if MOVED:
+        die("the desk moved to %s" % MOVED, 4, "run `talos login` again to log in at the new address")
     if not url:
         die("no desk url: the pointer file did not answer", 1, "talos login --url <desk url>")
     c = load_config()
     if pos:
-        c["token"] = pos[0]
+        c["token"] = pos[0]   # scripts and CI; anyone typing it should use `talos login --token`
+    elif kv.get("token"):
+        c["token"] = prompt_token()
     else:
-        c["token"] = post_login(url, device_login(url, bool(kv.get("json"))))["token"]
+        c["token"] = device_or_prompt(url, bool(kv.get("json")))
     c["url"] = url
     save_config(c)
     os.environ["TALOS_URL"], os.environ["TALOS_TOKEN"] = url, c["token"]
@@ -628,15 +733,15 @@ def cmd_login(argv):
         me = request("GET", "/me")
     except Desk as ex:
         fail(ex, "login")
-    print("logged in as @%s" % me["handle"])
+    print("logged in as @%s" % clean(me["handle"]))
     note("desk %s; %d asks left today" % (url, me["asks_per_day"] - me["asks_today"]))
     refresh_skill(quiet=True)
 
 
 def post_login(url, github_token):
     try:
-        out = json.loads(open_url("POST", url + "/login/github", {"access_token": github_token},
-                                  timeout=60).read().decode("utf-8", "replace"))
+        out = read_json(open_url("POST", url + "/login/github", {"access_token": github_token},
+                                 timeout=60))
     except Desk as ex:
         die(ex.error, EXIT.get(ex.status, 1), ex.hint)
     if out.get("note"):
@@ -653,7 +758,7 @@ def cmd_whoami(argv):
         print(json.dumps(me, indent=1))
         return
     line = "@%s: %d/%d asks today (resets %s), desk-wide %d/%d" % (
-        me["handle"], me["asks_today"], me["asks_per_day"], me["resets_at"],
+        clean(me["handle"]), me["asks_today"], me["asks_per_day"], clean(me["resets_at"]),
         me["asks_global_today"], me["asks_global_per_day"])
     if "writes_today" in me:
         line += "\n  writes %d/%d, delegates %d/%d%s" % (
@@ -705,6 +810,8 @@ def known_sheet(body):
             fenced = not fenced
         elif fenced and line.strip() and not line.startswith("talos "):
             return False
+        elif not fenced and line.strip() and line.startswith(("    ", "\t")):
+            return False  # markdown renders an indented block as code too, fence or no fence
     return not fenced
 
 
@@ -806,16 +913,44 @@ def ensure_dir(path):
 
 
 def write_file(path, text):
+    """Back up what is there, then swap the new text in by rename, so an interrupted write cannot
+    leave a half file where a harness reads its instructions."""
     ensure_dir(path)
-    with open(path, "w") as fh:
-        fh.write(text)
+    if os.path.isfile(path) and open_or_empty(path) == text:
+        return False
+    backup_once(path)
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".talos-")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    return True
+
+
+BACKED = set()
 
 
 def backup_once(path):
-    """One backup per file, ever, so a second setup cannot bury the pre-talos original."""
+    """The first copy of a file keeps its name, so `<file>.bak-talos` is always the pre-talos
+    original; later runs stamp theirs, so no change this client makes is the only copy."""
+    if path in BACKED or not os.path.isfile(path):
+        BACKED.add(path)
+        return
+    BACKED.add(path)
     bak = path + ".bak-talos"
-    if os.path.isfile(path) and not os.path.exists(bak):
+    if not os.path.exists(bak):
         shutil.copy2(path, bak)
+        return
+    if not os.path.isdir(BACKUP_DIR):
+        os.makedirs(BACKUP_DIR, 0o700)
+    flat = path.replace(os.sep, "-").strip("-")
+    shutil.copy2(path, os.path.join(BACKUP_DIR, "%s.%s" % (flat, time.strftime("%Y%m%dT%H%M%S"))))
 
 
 def json_indent(text):
@@ -846,11 +981,7 @@ def register_json(path, key, entry):
     state = "updated in " if MANAGED in section else "added to "
     section[MANAGED] = entry
     data[key] = section
-    backup_once(path)
-    ensure_dir(path)
-    with open(path, "w") as fh:
-        json.dump(data, fh, indent=json_indent(text))
-        fh.write("\n")
+    write_file(path, json.dumps(data, indent=json_indent(text)) + "\n")
     return state + path
 
 
@@ -879,14 +1010,16 @@ def register_block(path, block):
     """A marked block inside a file the user also writes in: replace ours, leave the rest alone."""
     text = open_or_empty(path)
     new = BLOCK_BEGIN + "\n" + block + "\n" + BLOCK_END
-    if BLOCK_BEGIN in text and BLOCK_END in text:
+    if BLOCK_BEGIN in text:
+        # a run that died between the two markers leaves a begin with no end: everything from it to
+        # the end of the file is that half-written block, and replacing it is the recovery
         head, rest = text.split(BLOCK_BEGIN, 1)
-        out = head + new + rest.split(BLOCK_END, 1)[1]
+        tail = rest.split(BLOCK_END, 1)[1] if BLOCK_END in rest else "\n"
+        out = head + new + tail
     else:
         out = (text.rstrip() + "\n\n" if text.strip() else "") + new + "\n"
     if out == text:
         return "already in " + path
-    backup_once(path)
     write_file(path, out)
     return "written to " + path
 
@@ -1012,7 +1145,7 @@ def cmd_doctor(argv):
     if url:
         try:
             r = urllib.request.urlopen(url.rstrip("/") + "/health", timeout=15)
-            health = json.loads(r.read().decode("utf-8", "replace"))
+            health = json.loads(read_capped(r, JSON_MAX))
             minv = r.headers.get("X-Talos-Min-Client") or health.get("min_client")
         except Exception as e:
             note("talos: /health said %s" % e)
@@ -1025,7 +1158,7 @@ def cmd_doctor(argv):
             who = request("GET", "/me", timeout=20)
         except (Desk, SystemExit) as ex:
             note("talos: /me said %s" % ex)
-    good &= check("token valid", bool(who), ("@" + who["handle"]) if who else "rejected",
+    good &= check("token valid", bool(who), ("@" + clean(who["handle"])) if who else "rejected",
                   "talos login")
     installed = [p for p in SKILL_PATHS if os.path.isfile(p)]
     good &= check("skill installed", bool(installed), ", ".join(installed) or "nowhere", "talos setup")
@@ -1038,10 +1171,98 @@ def cmd_doctor(argv):
             continue
         good &= check(row["name"], state and os.path.isfile(sheet),
                       "mcp registered, " + where, "talos setup --harness " + row["name"])
-    current = not (minv and version_tuple(minv) > version_tuple(VERSION))
-    good &= check("client version", current, VERSION if current else VERSION + ", desk wants " + minv,
-                  "curl -fsSL https://raw.githubusercontent.com/pubky/talos-cli/main/install.sh | sh")
+    want = version_tuple(minv) if minv else None
+    current = not (want and want > version_tuple(VERSION))
+    good &= check("client version", current,
+                  VERSION if current else VERSION + ", desk wants " + clean(minv), "talos update")
     sys.exit(0 if good else 1)
+
+
+# ---------- update: the release the installer pins, checksum before anything else ----------
+
+UPDATE_USAGE = """talos update [--check] [--force]
+
+Fetch the release install.sh pins, check its sha256, and replace this file with it. The copy it
+replaces is kept beside it as talos.prev, so `talos rollback` puts a bad release back.
+
+--check   print what the pinned release is and stop
+--force   install the pinned release even when it is not newer than this client"""
+
+
+def binary_path():
+    return os.path.realpath(shutil.which("talos") or os.path.abspath(__file__))
+
+
+def pinned_release():
+    """install.sh carries the version of the release and the sha256 of its `talos`, so an update
+    reads exactly what the install line reads, and the tag it names cannot be moved under us."""
+    try:
+        text = read_capped(urllib.request.urlopen(INSTALLER_URL, timeout=30), 64 * 1024, "the installer")
+    except urllib.error.URLError as e:
+        die("cannot read %s: %s" % (INSTALLER_URL, e.reason), 1, "check your network and try again")
+    ver = re.search(r'(?m)^TALOS_VERSION="([0-9]+(?:\.[0-9]+)*)"$', text)
+    sha = re.search(r'(?m)^TALOS_SHA256="([0-9a-f]{64})"$', text)
+    if not ver or not sha:
+        die("the installer at %s pins no version and checksum" % INSTALLER_URL, 1,
+            "nothing was downloaded; tell @SHAcollision")
+    return ver.group(1), sha.group(1)
+
+
+def install_binary(data):
+    target = binary_path()
+    try:
+        # private and unguessable, in the directory it will land in: no other installer on this
+        # machine can aim at it, and the rename is atomic
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target) or ".", prefix=".talos-")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.chmod(tmp, 0o755)
+        if os.path.isfile(target):
+            shutil.copy2(target, target + ".prev")
+        os.replace(tmp, target)
+    except OSError as e:
+        die("cannot replace %s: %s" % (target, e.strerror), 1,
+            "rerun the install line, or install somewhere you can write")
+    return target
+
+
+def cmd_update(argv):
+    pos, kv = opts(argv, set(["check", "force"]))
+    if kv.get("help") or kv.get("h"):
+        print(UPDATE_USAGE)
+        return
+    ver, sha = pinned_release()
+    print("this client is %s, the pinned release is %s" % (VERSION, ver))
+    if kv.get("check"):
+        return
+    if version_tuple(ver) <= version_tuple(VERSION) and not kv.get("force"):
+        print("nothing to do" if ver == VERSION else "the pinned release is older; --force installs it anyway")
+        return
+    url = "%s/v%s/talos" % (REPO_RAW, ver)
+    try:
+        data = urllib.request.urlopen(url, timeout=120).read(PAYLOAD_MAX + 1)
+    except urllib.error.URLError as e:
+        die("cannot download %s: %s" % (url, e.reason), 1, "check your network and try again")
+    got = hashlib.sha256(data).hexdigest()
+    if len(data) > PAYLOAD_MAX or got != sha:
+        die("%s is not the file the installer pins" % url, 1,
+            "expected %s, got %s; nothing was replaced" % (sha, got))
+    target = install_binary(data)
+    print("talos %s installed at %s; the copy it replaced is %s.prev" % (ver, target, target))
+
+
+def cmd_rollback(argv):
+    target = binary_path()
+    prev = target + ".prev"
+    if not os.path.isfile(prev):
+        die("there is no %s to go back to" % prev, 1, "rerun the install line for the pinned release")
+    try:
+        os.replace(prev, target)
+        os.chmod(target, 0o755)
+    except OSError as e:
+        die("cannot put %s back: %s" % (prev, e.strerror), 1, "move it yourself: mv %s %s" % (prev, target))
+    m = re.search(r'(?m)^VERSION = "([0-9.]+)"', open_or_empty(target))
+    print("talos %s is back at %s" % (m.group(1) if m else "?", target))
 
 
 # ---------- MCP over stdio: every request goes to the desk's /mcp as is ----------
@@ -1076,6 +1297,18 @@ def cmd_mcp(argv):
         try:
             r = urllib.request.urlopen(req, timeout=20 * 60)
             payload = r.read(MCP_MAX).decode("utf-8", "replace")
+            minv = r.headers.get("X-Talos-Min-Client")
+            want = version_tuple(minv) if minv else None
+            if want and want > version_tuple(VERSION):
+                # the agent never sees stderr, so the refusal has to be the answer to its request
+                if mid is not None:
+                    out.write(json.dumps({"jsonrpc": "2.0", "id": mid, "error": {
+                        "code": -32000, "message": "talos is %s and the desk needs %s: run `talos update`"
+                                                   % (VERSION, minv)}}) + "\n")
+                    out.flush()
+                sys.stderr.write("talos: this client is %s and the desk needs %s; run `talos update`\n"
+                                 % (VERSION, clean(minv)))
+                sys.exit(1)
             if r.getcode() == 202 or mid is None:
                 continue
             # one request, one reply: a body carrying a second frame would reach the agent as the
@@ -1091,7 +1324,7 @@ def cmd_mcp(argv):
             out.flush()
         except urllib.error.HTTPError as e:
             try:
-                err = json.loads(e.read().decode("utf-8", "replace")).get("error", str(e.reason))
+                err = json.loads(e.read(JSON_MAX).decode("utf-8", "replace")).get("error", str(e.reason))
             except ValueError:
                 err = str(e.reason)
             if mid is not None:
@@ -1108,7 +1341,8 @@ def cmd_mcp(argv):
 # ---------- entry ----------
 
 PLAIN = {"login": cmd_login, "whoami": cmd_whoami, "doctor": cmd_doctor, "setup": cmd_setup,
-         "mcp": cmd_mcp, "verbs": cmd_verbs, "skill": cmd_skill}
+         "mcp": cmd_mcp, "verbs": cmd_verbs, "skill": cmd_skill, "update": cmd_update,
+         "rollback": cmd_rollback}
 
 
 def main(argv):
@@ -1116,12 +1350,18 @@ def main(argv):
     if "--quiet" in argv:
         QUIET = True
         argv = [a for a in argv if a != "--quiet"]
-    if "--url" in argv:
-        i = argv.index("--url")
-        if i + 1 >= len(argv):
-            die("--url needs a value", 2)
-        os.environ["TALOS_URL"] = argv[i + 1]
-        argv = argv[:i] + argv[i + 2:]
+    # --url is global: it is the desk every verb of this run talks to, not just login's
+    for i, a in enumerate(argv):
+        if a == "--url":
+            if i + 1 >= len(argv):
+                die("--url needs a value", 2)
+            os.environ["TALOS_URL"] = argv[i + 1]
+            argv = argv[:i] + argv[i + 2:]
+            break
+        if a.startswith("--url="):
+            os.environ["TALOS_URL"] = a[6:]
+            argv = argv[:i] + argv[i + 1:]
+            break
     if not argv:
         usage_all()
         return
@@ -1153,7 +1393,7 @@ This page is a snapshot of the sheet the desk serves; `talos setup` and
 
 Rule of thumb: `talos find` first, it is free and instant. Then `talos skills` for what the team already wrote down. `talos ask` only when the answer needs Talos's own memory or judgement, and `talos delegate` when the job takes minutes and you do not want to wait.
 
-Not logged in? Run `talos login`, open the GitHub device prompt it prints and enter the code. The desk checks you are in the pubky org and gives you a token of its own; logging in again rotates that token and the old one stops working. Someone outside the org uses `talos login <token>` with a token from @SHAcollision.
+Not logged in? Run `talos login`, open the GitHub device prompt it prints and enter the code. The desk checks you are in the pubky org and gives you a token of its own; logging in again rotates that token and the old one stops working. Someone outside the org runs `talos login --token` and pastes the token @SHAcollision sent them; the token is never typed on a command line.
 
 ## Read verbs: free, seconds, no model
 
