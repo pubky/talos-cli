@@ -5,7 +5,9 @@
   talos login                                             log in with your GitHub account (device prompt)
   talos login <token> [--url https://...]                 log in with a token instead (people outside the org)
   talos doctor                                            check config, desk, token, skill, MCP, version
-  talos setup                                             register the skill and MCP server, refresh the sheet
+  talos setup                                             register the skill and MCP server with every harness found
+  talos setup --harness cursor                            one harness only, installed or not
+  talos setup --print-mcp | --print-rules                 the MCP block and the sheet, for a harness you paste by hand
   talos mcp                                               stdio MCP server (what Claude Code and Codex run)
 
 Global flags: --json (the desk's JSON on stdout), --yes (do it, for write verbs), --url, --quiet.
@@ -664,47 +666,281 @@ FRONTMATTER = ('---\nname: talos\ndescription: "Talos is the pubky team\'s agent
                'review, file an issue."\n---\n\n')
 
 
-def refresh_skill(quiet=False):
+def skill_text():
     """The desk serves the sheet; the copy embedded here is only a bootstrap."""
-    body = None
     try:
         body = request("GET", "/skill", stream=True, timeout=30).read().decode("utf-8", "replace")
     except (Desk, SystemExit, IOError, OSError):
         body = None
-    text = FRONTMATTER + (body or SKILL_MD)
-    for p in SKILL_PATHS:
-        d = os.path.dirname(p)
-        if not os.path.isdir(d):
-            os.makedirs(d)
-        with open(p, "w") as fh:
-            fh.write(text)
+    return FRONTMATTER + (body or SKILL_MD), bool(body)
+
+
+# ---------- the harnesses talos registers itself with ----------
+
+MANAGED = "talos"
+BLOCK_BEGIN = "<!-- talos:begin (managed by `talos setup`) -->"
+BLOCK_END = "<!-- talos:end -->"
+
+# Short on purpose: this goes into files the harness shares with everything else the user wrote,
+# and Windsurf caps global rules at 6000 characters. The full sheet is one `talos skill` away.
+RULES_BLOCK = """## Talos, the pubky team's agent
+
+`talos` is installed on this machine. Reach for it for anything about this team: where something
+was discussed, who reported what, who owns a repo, what a call concluded, who is out.
+
+- `talos find "<words>"` first. It is free and instant, and it searches Slack, Meet transcripts,
+  Drive, GitHub and pubky.app at once.
+- `talos skills` lists what the team already wrote down, `talos skills <name>` prints one.
+- `talos ask "<question>"` only when find and those skills cannot answer it.
+- `talos review <pr-url>` after opening a PR in a pubky repo.
+- Write verbs change something and do nothing without `--yes`. Read the preview first.
+- `talos skill` prints the full sheet, `talos` lists every verb, `talos login` signs in.
+
+Never paste secrets, tokens or private keys into an ask or a delegate."""
+
+
+def config_home():
+    return os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+
+
+def opencode_config(d):
+    """opencode reads either spelling; edit the one that is already there."""
+    jsonc = os.path.join(d, "opencode.jsonc")
+    return jsonc if os.path.isfile(jsonc) else os.path.join(d, "opencode.json")
+
+
+def harnesses():
+    """One row per coding harness: how to spot it, where its MCP registry lives, and where its copy
+    of the sheet goes. Every path comes from that harness's own docs; see the table in README.md.
+    claude and codex are always written, which is what they did before this table existed."""
+    home = os.path.expanduser("~")
+    windsurf = os.path.join(home, ".codeium", "windsurf")
+    opencode = os.path.join(config_home(), "opencode")
+    return [
+        {"name": "claude", "bin": "claude", "dirs": [os.path.join(home, ".claude")], "always": True,
+         "mcp": {"kind": "claude-cli"},
+         "sheet": {"kind": "skill", "path": SKILL_PATHS[0]}},
+        {"name": "codex", "bin": "codex", "dirs": [os.path.join(home, ".codex")], "always": True,
+         "mcp": {"kind": "toml", "path": os.path.join(home, ".codex", "config.toml")},
+         "sheet": {"kind": "skill", "path": SKILL_PATHS[1]}},
+        {"name": "cursor", "bin": "cursor", "dirs": [os.path.join(home, ".cursor")],
+         "mcp": {"kind": "json", "path": os.path.join(home, ".cursor", "mcp.json"), "key": "mcpServers"},
+         "sheet": {"kind": "skill", "path": os.path.join(home, ".cursor", "skills", "talos", "SKILL.md")}},
+        {"name": "windsurf", "bin": "windsurf", "dirs": [windsurf],
+         "mcp": {"kind": "json", "path": os.path.join(windsurf, "mcp_config.json"), "key": "mcpServers"},
+         "sheet": {"kind": "block", "path": os.path.join(windsurf, "memories", "global_rules.md")}},
+        {"name": "gemini", "bin": "gemini", "dirs": [os.path.join(home, ".gemini")],
+         "mcp": {"kind": "json", "path": os.path.join(home, ".gemini", "settings.json"), "key": "mcpServers"},
+         "sheet": {"kind": "block", "path": os.path.join(home, ".gemini", "GEMINI.md")}},
+        {"name": "opencode", "bin": "opencode", "dirs": [opencode, os.path.join(home, ".opencode")],
+         "mcp": {"kind": "json", "path": opencode_config(opencode), "key": "mcp", "entry": "opencode"},
+         "sheet": {"kind": "skill", "path": os.path.join(opencode, "skills", "talos", "SKILL.md")}},
+    ]
+
+
+def detected(row):
+    if row.get("always") or shutil.which(row["bin"]):
+        return True
+    return any(os.path.isdir(d) for d in row["dirs"])
+
+
+def live_harnesses():
+    return [r for r in harnesses() if detected(r)]
+
+
+def mcp_entry(mcp, me):
+    if mcp.get("entry") == "opencode":
+        return {"type": "local", "command": [me, "mcp"], "enabled": True}
+    return {"command": me, "args": ["mcp"]}
+
+
+def ensure_dir(path):
+    d = os.path.dirname(path)
+    if d and not os.path.isdir(d):
+        os.makedirs(d)
+
+
+def write_file(path, text):
+    ensure_dir(path)
+    with open(path, "w") as fh:
+        fh.write(text)
+
+
+def backup_once(path):
+    """One backup per file, ever, so a second setup cannot bury the pre-talos original."""
+    bak = path + ".bak-talos"
+    if os.path.isfile(path) and not os.path.exists(bak):
+        shutil.copy2(path, bak)
+
+
+def json_indent(text):
+    """Rewrite the file the way its author indented it, so the diff is our key and nothing else."""
+    for line in text.splitlines():
+        body = line.lstrip()
+        if body and body != line and body[0] in '"{[':
+            lead = line[:len(line) - len(body)]
+            return "\t" if lead[0] == "\t" else lead
+    return "  "
+
+
+def register_json(path, key, entry):
+    text = open_or_empty(path)
+    data = {}
+    if text.strip():
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            return "cannot parse %s; paste `talos setup --print-mcp` into it by hand" % path
+    section = data.get(key)
+    if not isinstance(section, dict):
+        section = {}
+    if section.get(MANAGED) == entry:
+        return "already in " + path
+    state = "updated in " if MANAGED in section else "added to "
+    section[MANAGED] = entry
+    data[key] = section
+    backup_once(path)
+    ensure_dir(path)
+    with open(path, "w") as fh:
+        json.dump(data, fh, indent=json_indent(text))
+        fh.write("\n")
+    return state + path
+
+
+def register_toml(path, me):
+    """Append only: a TOML file we did not write is not ours to reshape."""
+    if "[mcp_servers.%s]" % MANAGED in open_or_empty(path):
+        return "already in " + path
+    backup_once(path)
+    ensure_dir(path)
+    with open(path, "a") as fh:
+        fh.write('\n[mcp_servers.%s]\ncommand = "%s"\nargs = ["mcp"]\n' % (MANAGED, me))
+    return "added to " + path
+
+
+def register_claude_cli(me):
+    if not shutil.which("claude"):
+        return "claude is not installed, skipped"
+    devnull = open(os.devnull, "w")
+    rc = subprocess.call(["claude", "mcp", "add", "-s", "user", MANAGED, "--", me, "mcp"],
+                         stdout=devnull, stderr=subprocess.STDOUT)
+    devnull.close()
+    return "registered" if rc == 0 else "already registered"
+
+
+def register_block(path, block):
+    """A marked block inside a file the user also writes in: replace ours, leave the rest alone."""
+    text = open_or_empty(path)
+    new = BLOCK_BEGIN + "\n" + block + "\n" + BLOCK_END
+    if BLOCK_BEGIN in text and BLOCK_END in text:
+        head, rest = text.split(BLOCK_BEGIN, 1)
+        out = head + new + rest.split(BLOCK_END, 1)[1]
+    else:
+        out = (text.rstrip() + "\n\n" if text.strip() else "") + new + "\n"
+    if out == text:
+        return "already in " + path
+    backup_once(path)
+    write_file(path, out)
+    return "written to " + path
+
+
+def register_mcp(row, me):
+    m = row["mcp"]
+    if m["kind"] == "claude-cli":
+        return register_claude_cli(me)
+    if m["kind"] == "toml":
+        return register_toml(m["path"], me)
+    return register_json(m["path"], m["key"], mcp_entry(m, me))
+
+
+def registered_in(row):
+    """True, False, or None when only the harness itself could say and it would not."""
+    m = row["mcp"]
+    if m["kind"] == "claude-cli":
+        if not shutil.which("claude"):
+            return None
+        p = None
+        try:
+            p = subprocess.Popen(["claude", "mcp", "list"], stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT)
+            return MANAGED in p.communicate(timeout=30)[0].decode("utf-8", "replace")
+        except Exception:
+            if p:
+                p.kill()
+            return None
+    if m["kind"] == "toml":
+        return "[mcp_servers.%s]" % MANAGED in open_or_empty(m["path"])
+    try:
+        data = json.loads(open_or_empty(m["path"]) or "{}")
+    except ValueError:
+        return None
+    section = data.get(m["key"]) if isinstance(data, dict) else None
+    return MANAGED in section if isinstance(section, dict) else False
+
+
+def say(name, what, detail):
+    print("%-9s %-6s %s" % (name, what, detail))
+
+
+def refresh_skill(rows=None, quiet=False):
+    """Every harness gets the same sheet, as its own skill file or as a block in its rules file."""
+    text, live = skill_text()
+    for row in (live_harnesses() if rows is None else rows):
+        sheet = row["sheet"]
+        if sheet["kind"] == "skill":
+            write_file(sheet["path"], text)
+            detail = "%s (%s)" % (sheet["path"],
+                                  "from the desk" if live else "embedded copy, the desk was not reachable")
+        else:
+            detail = register_block(sheet["path"], RULES_BLOCK)
         if not quiet:
-            print("skill: %s (%s)" % (p, "from the desk" if body else "embedded copy, the desk was not reachable"))
-    return bool(body)
+            say(row["name"], "skill" if sheet["kind"] == "skill" else "rules", detail)
+    return live
+
+
+SETUP_FLAGS = ("harness", "print-mcp", "print-rules")
+SETUP_USAGE = """talos setup [--harness <name>] [--print-mcp] [--print-rules]
+
+Register the MCP server and the sheet with every coding harness on this machine. A harness counts
+as present when its config directory or its binary is there; claude and codex are written either
+way.
+
+--harness <name>   write one harness, installed or not: %s
+--print-mcp        print the MCP block, for a harness talos does not write to
+--print-rules      print the sheet, to paste where that harness keeps its rules"""
 
 
 def cmd_setup(argv):
+    pos, kv = opts(argv, set(["print-mcp", "print-rules"]))
+    if kv.get("help") or kv.get("h"):
+        print(SETUP_USAGE % ", ".join(r["name"] for r in harnesses()))
+        return
+    for k in kv:
+        if k not in SETUP_FLAGS:
+            die("setup does not take --%s" % k, 2, "flags: --harness NAME --print-mcp --print-rules")
     me = shutil.which("talos") or os.path.abspath(__file__)
-    refresh_skill()
-    if shutil.which("claude"):
-        devnull = open(os.devnull, "w")
-        rc = subprocess.call(["claude", "mcp", "add", "-s", "user", "talos", "--", me, "mcp"],
-                             stdout=devnull, stderr=subprocess.STDOUT)
-        devnull.close()
-        print("claude: mcp server talos %s" % ("registered" if rc == 0 else "already registered"))
+    if kv.get("print-mcp"):
+        print(json.dumps({"mcpServers": {MANAGED: mcp_entry({}, me)}}, indent=2))
+        return
+    if kv.get("print-rules"):
+        print(skill_text()[0].rstrip())
+        return
+    if kv.get("harness"):
+        rows = [r for r in harnesses() if r["name"] == kv["harness"]]
+        if not rows:
+            die("no harness %s" % kv["harness"], 2,
+                "one of " + ", ".join(r["name"] for r in harnesses()))
     else:
-        print("claude: not installed, skipped")
-    codex = os.path.expanduser("~/.codex/config.toml")
-    block = '\n[mcp_servers.talos]\ncommand = "%s"\nargs = ["mcp"]\n' % me
-    cur = open_or_empty(codex)
-    if "[mcp_servers.talos]" not in cur:
-        if not os.path.isdir(os.path.dirname(codex)):
-            os.makedirs(os.path.dirname(codex))
-        with open(codex, "a") as fh:
-            fh.write(block)
-        print("codex: mcp server talos added to %s" % codex)
-    else:
-        print("codex: mcp server talos already in config.toml")
+        rows = live_harnesses()
+    refresh_skill(rows)
+    for row in rows:
+        say(row["name"], "mcp", register_mcp(row, me))
+    missing = [r["name"] for r in harnesses() if not detected(r)] if not kv.get("harness") else []
+    if missing:
+        note("not installed, skipped: %s (talos setup --harness <name> writes one anyway)"
+             % ", ".join(missing))
 
 
 def open_or_empty(path):
@@ -748,14 +984,15 @@ def cmd_doctor(argv):
                   "talos login")
     installed = [p for p in SKILL_PATHS if os.path.isfile(p)]
     good &= check("skill installed", bool(installed), ", ".join(installed) or "nowhere", "talos setup")
-    mcp_ok = "[mcp_servers.talos]" in open_or_empty(os.path.expanduser("~/.codex/config.toml"))
-    if not mcp_ok and shutil.which("claude"):
-        try:
-            p = subprocess.Popen(["claude", "mcp", "list"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            mcp_ok = "talos" in p.communicate()[0].decode("utf-8", "replace")
-        except OSError:
-            pass
-    good &= check("mcp registered", mcp_ok, "claude or codex", "talos setup")
+    for row in live_harnesses():
+        sheet = row["sheet"]["path"]
+        where = "sheet %s" % ("yes" if os.path.isfile(sheet) else "missing")
+        state = registered_in(row)
+        if state is None:
+            print("ok   %-18s detected, it does not say whether talos is registered" % row["name"])
+            continue
+        good &= check(row["name"], state and os.path.isfile(sheet),
+                      "mcp registered, " + where, "talos setup --harness " + row["name"])
     current = not (minv and version_tuple(minv) > version_tuple(VERSION))
     good &= check("client version", current, VERSION if current else VERSION + ", desk wants " + minv,
                   "curl -fsSL https://raw.githubusercontent.com/pubky/talos-cli/main/install.sh | sh")
