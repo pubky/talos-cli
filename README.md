@@ -45,6 +45,10 @@ in.
 `talos setup` reruns the registration and refreshes the skill from the desk; `talos doctor`
 checks the whole chain, lists every harness it found and says what to fix.
 
+That install line follows `main`, so what you get is whatever `main` holds when you run it. To pin
+it, put a commit SHA in place of `main` in both URLs. What the client trusts, what it refuses from
+the desk, and where your token lives: [docs/security.md](docs/security.md).
+
 ### What setup writes, and where
 
 A harness counts as present when its config directory or its binary is there, and only a present
@@ -113,6 +117,7 @@ judgement; `review` after opening a PR. The same verbs are MCP tools (`talos_fin
 talos                       the CLI, single file, Python 3.8+ standard library only
 install.sh                  curl | sh installer
 desk-url.txt                where the desk is today, one line
+docs/security.md            what the client trusts, what it refuses, what it accepts
 scripts/selftest.sh         every CLI path against a stub desk, plus harness registration in a fake home
 scripts/sync-plugin.sh      copy the CLI into the plugin and regenerate its skill
 plugins/talos/              Claude Code plugin: the CLI, the skill, the MCP server config
