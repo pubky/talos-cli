@@ -4,10 +4,10 @@
 #
 # The two lines below are the release: scripts/release.sh writes them, and nothing here runs unless
 # the file downloaded from that tag has that sha256. This file is what pins what executes, so
-# fetching it at a tag (.../v0.3.1/install.sh) pins the whole chain.
+# fetching it at a tag (.../v0.4.0/install.sh) pins the whole chain.
 set -eu
-TALOS_VERSION="0.3.1"
-TALOS_SHA256="0000000000000000000000000000000000000000000000000000000000000000"
+TALOS_VERSION="0.4.0"
+TALOS_SHA256="8dcc3bd9c2d2c9e3e70576f545632cd58bcc03b36070baae9d5d5f726bc23aab"
 
 REPO="${TALOS_REPO_RAW:-https://raw.githubusercontent.com/pubky/talos-cli}"
 RAW="$REPO/v$TALOS_VERSION/talos"

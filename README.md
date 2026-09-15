@@ -54,10 +54,10 @@ match, so nothing unverified is ever executed or moved into place. The URL above
 because `install.sh` is what does the pinning. To pin the installer too, take it from the tag:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/pubky/talos-cli/v0.3.1/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/pubky/talos-cli/v0.4.0/install.sh | sh
 ```
 
-talos 0.3.1 is sha256 `0000000000000000000000000000000000000000000000000000000000000000`, which is
+talos 0.4.0 is sha256 `8dcc3bd9c2d2c9e3e70576f545632cd58bcc03b36070baae9d5d5f726bc23aab`, which is
 what `sha256sum ~/.local/bin/talos` prints after the install. What the client trusts, what it
 refuses from the desk, and where your token lives: [docs/security.md](docs/security.md).
 
