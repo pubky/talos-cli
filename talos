@@ -46,6 +46,7 @@ SKILL_PATHS = [os.path.expanduser("~/.claude/skills/talos/SKILL.md"),
                os.path.expanduser("~/.codex/skills/talos/SKILL.md")]
 
 # Where the desk lives when nobody said. One line, one commit to move the whole team.
+DEFAULT_URL = "https://talos-desk.pubky.app"   # the pointer file overrides this when the desk moves
 POINTER_URL = os.environ.get("TALOS_POINTER_URL") or "https://raw.githubusercontent.com/pubky/talos-cli/main/desk-url.txt"
 GITHUB_OAUTH = os.environ.get("TALOS_GITHUB_OAUTH") or "https://github.com"
 
@@ -207,9 +208,9 @@ def pointer_url():
     try:
         raw = urllib.request.urlopen(POINTER_URL, timeout=15).read(500).decode("utf-8", "replace")
     except Exception:
-        return ""
+        return DEFAULT_URL
     line = raw.strip().splitlines()[0].strip() if raw.strip() else ""
-    return line if line.startswith("http") else ""
+    return line if line.startswith("http") else DEFAULT_URL
 
 
 def resolve_url(refresh=False):

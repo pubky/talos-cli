@@ -7,6 +7,11 @@ Give your agent this one line and it does the rest:
 
 > Install the talos CLI with `curl -fsSL https://raw.githubusercontent.com/pubky/talos-cli/main/install.sh | sh`, run `talos login` and complete the GitHub device prompt it prints, then `talos whoami`; from now on use talos for anything about this team (`talos` lists the verbs).
 
+Until GitHub device login is switched on, the line is the same with a token @SHAcollision sends
+you by DM in place of the device prompt:
+
+> Install the talos CLI with `curl -fsSL https://raw.githubusercontent.com/pubky/talos-cli/main/install.sh | sh`, run `talos login <token>`, then `talos whoami`; from now on use talos for anything about this team (`talos` lists the verbs).
+
 No token to paste and no URL to look up: `talos login` prints an "Open ... and enter code ..."
 line, you open that page, type the code, and the desk checks your pubky org membership and gives
 you a token of its own. Logging in again rotates it, so the old one stops working.
