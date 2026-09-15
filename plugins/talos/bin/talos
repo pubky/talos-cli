@@ -181,8 +181,9 @@ def load_config():
 
 def save_config(c):
     if not os.path.isdir(CONFIG_DIR):
-        os.makedirs(CONFIG_DIR)
-    with open(CONFIG, "w") as fh:
+        os.makedirs(CONFIG_DIR, 0o700)
+    fd = os.open(CONFIG, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # never readable, not even briefly
+    with os.fdopen(fd, "w") as fh:
         json.dump(c, fh, indent=1)
     os.chmod(CONFIG, 0o600)
 
