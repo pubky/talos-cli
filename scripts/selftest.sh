@@ -271,5 +271,120 @@ echo '{"jsonrpc":"2.0","id":1,"method":"ping"}' | env -u TALOS_TOKEN -u TALOS_UR
   "$CLI" mcp 2>/dev/null | grep -q "not logged in" \
   && PASS=$((PASS+1)) || { echo "FAIL mcp logged-out error"; FAIL=$((FAIL+1)); }
 
+# ---- setup registers each harness where that harness's docs say, and only where it exists ----
+# Every home below is fake and PATH is stripped, so detection is the directories and nothing else,
+# and the MCP command is the absolute path to this CLI.
+H="$T/harness"
+hsetup() { # hsetup <home> [extra args] ; the desk is still the v0.2 stub, so the sheet is live
+  home="$1"; shift
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" PATH=/usr/bin:/bin "$CLI" setup "$@" >"$T/setup.out" 2>&1
+}
+ok() { # ok <name> <command...>
+  name="$1"; shift
+  if "$@"; then PASS=$((PASS+1)); else echo "FAIL $name"; FAIL=$((FAIL+1)); fi
+}
+jq_is() { # jq_is <file> <python expression over d>
+  python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if eval(sys.argv[2]) else 1)' "$1" "$2"
+}
+
+# a home where every harness is installed, plus files the user already had
+mkdir -p "$H/all/.cursor" "$H/all/.codeium/windsurf/memories" "$H/all/.gemini" "$H/all/.config/opencode"
+printf '{\n    "mcpServers": {\n        "other": {\n            "command": "npx"\n        }\n    }\n}\n' > "$H/all/.cursor/mcp.json"
+printf '{\n  "theme": "dark"\n}\n' > "$H/all/.gemini/settings.json"
+printf '# my own rules\n\nbe nice\n' > "$H/all/.codeium/windsurf/memories/global_rules.md"
+mkdir -p "$H/all/.codex"
+printf 'model = "gpt-5"\n' > "$H/all/.codex/config.toml"
+hsetup "$H/all"
+
+ok "cursor mcp entry" python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if d["mcpServers"]["talos"] == {"command": sys.argv[2], "args": ["mcp"]} else 1)' "$H/all/.cursor/mcp.json" "$CLI"
+ok "cursor keeps other servers" jq_is "$H/all/.cursor/mcp.json" 'd["mcpServers"]["other"]["command"] == "npx"'
+ok "cursor keeps 4-space indent" grep -q '^    "mcpServers"' "$H/all/.cursor/mcp.json"
+ok "cursor sheet" grep -q "the served sheet" "$H/all/.cursor/skills/talos/SKILL.md"
+ok "cursor sheet frontmatter" grep -q "^name: talos" "$H/all/.cursor/skills/talos/SKILL.md"
+
+ok "windsurf mcp entry" python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if d["mcpServers"]["talos"] == {"command": sys.argv[2], "args": ["mcp"]} else 1)' \
+  "$H/all/.codeium/windsurf/mcp_config.json" "$CLI"
+ok "windsurf global rules block" grep -q "talos:begin" "$H/all/.codeium/windsurf/memories/global_rules.md"
+ok "windsurf keeps the user's rules" grep -q "be nice" "$H/all/.codeium/windsurf/memories/global_rules.md"
+
+ok "gemini mcp entry" python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if d["mcpServers"]["talos"] == {"command": sys.argv[2], "args": ["mcp"]} else 1)' \
+  "$H/all/.gemini/settings.json" "$CLI"
+ok "gemini keeps other settings" jq_is "$H/all/.gemini/settings.json" 'd["theme"] == "dark"'
+ok "gemini keeps 2-space indent" grep -q '^  "theme"' "$H/all/.gemini/settings.json"
+ok "GEMINI.md block" grep -q "talos:begin" "$H/all/.gemini/GEMINI.md"
+
+ok "opencode mcp entry" python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if d["mcp"]["talos"] == {"type": "local", "command": [sys.argv[2], "mcp"], "enabled": True} else 1)' \
+  "$H/all/.config/opencode/opencode.json" "$CLI"
+ok "opencode sheet" grep -q "the served sheet" "$H/all/.config/opencode/skills/talos/SKILL.md"
+
+ok "codex block appended" grep -q "^\[mcp_servers.talos\]" "$H/all/.codex/config.toml"
+ok "codex keeps its own keys" grep -q '^model = "gpt-5"' "$H/all/.codex/config.toml"
+ok "claude skipped without the binary" grep -q "claude is not installed" "$T/setup.out"
+
+# every file we touched has exactly one backup, and it is the file as we found it
+ok "cursor backup is the original" grep -q '"npx"' "$H/all/.cursor/mcp.json.bak-talos"
+ok "cursor backup has no talos" sh -c '! grep -q talos "'"$H/all/.cursor/mcp.json.bak-talos"'"'
+ok "windsurf backup is the original" sh -c '! grep -q talos "'"$H/all/.codeium/windsurf/memories/global_rules.md.bak-talos"'"'
+
+# a second run changes nothing and appends nothing
+find "$H/all" -type f ! -name "*.bak-talos" -exec md5sum {} + | sort > "$T/before.md5"
+hsetup "$H/all"
+find "$H/all" -type f ! -name "*.bak-talos" -exec md5sum {} + | sort > "$T/after.md5"
+ok "second setup is a no-op" cmp -s "$T/before.md5" "$T/after.md5"
+ok "codex block not duplicated" \
+  sh -c 'test "$(grep -c "^\[mcp_servers.talos\]" "'"$H/all/.codex/config.toml"'")" = 1'
+ok "backup not taken twice" grep -q '"npx"' "$H/all/.cursor/mcp.json.bak-talos"
+ok "second run says already" grep -q "already in" "$T/setup.out"
+
+# an entry someone edited by hand gets put back, the neighbours do not move
+python3 - "$H/all/.cursor/mcp.json" <<'EOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["mcpServers"]["talos"] = {"command": "/wrong/talos", "args": ["mcp"]}
+json.dump(d, open(sys.argv[1], "w"), indent=4)
+EOF
+hsetup "$H/all"
+ok "stale entry updated" python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if d["mcpServers"]["talos"]["command"] == sys.argv[2] and d["mcpServers"]["other"] else 1)' \
+  "$H/all/.cursor/mcp.json" "$CLI"
+
+# a home with no harness but the two that are always written
+mkdir -p "$H/bare"
+hsetup "$H/bare"
+ok "bare home gets codex" test -f "$H/bare/.codex/config.toml"
+ok "bare home leaves cursor alone" test ! -e "$H/bare/.cursor"
+ok "bare home leaves windsurf alone" test ! -e "$H/bare/.codeium"
+ok "bare home leaves gemini alone" test ! -e "$H/bare/.gemini"
+ok "bare home names what it skipped" grep -q "not installed, skipped: cursor, windsurf, gemini, opencode" "$T/setup.out"
+
+# --harness writes one harness that is not installed, and nothing else
+mkdir -p "$H/forced"
+hsetup "$H/forced" --harness gemini
+ok "--harness gemini writes settings.json" test -f "$H/forced/.gemini/settings.json"
+ok "--harness gemini writes GEMINI.md" test -f "$H/forced/.gemini/GEMINI.md"
+ok "--harness gemini touches nothing else" test ! -e "$H/forced/.codex"
+t setup-help 0 "--print-rules" -- setup --help
+t setup-bad-harness 2 "no harness nope" -- setup --harness nope
+t setup-bad-flag 2 "does not take --bogus" -- setup --bogus x
+
+# the blocks to paste into a harness we do not write to
+"$CLI" setup --print-mcp > "$T/print.json" 2>/dev/null
+ok "--print-mcp is the stdio block" python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if d["mcpServers"]["talos"]["args"] == ["mcp"] and d["mcpServers"]["talos"]["command"] else 1)' "$T/print.json"
+ok "--print-mcp writes no file" test ! -e "$H/forced/.cursor"
+t print-rules 0 "name: talos" -- setup --print-rules
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
