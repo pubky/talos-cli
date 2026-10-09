@@ -14,12 +14,15 @@ Not logged in? Run `talos login`, open the GitHub device prompt it prints and en
 
 ## Read verbs: free, seconds, no model
 
-`talos find "<words>" [--in slack,meet,drive,github,code,pubky] [--days N] [--from who] [--limit N]`
+`talos find "<words>" [--in slack,meet,drive,github,docs,code,pubky] [--days N | --after YYYY-MM-DD] [--before YYYY-MM-DD] [--from who] [--limit N] [--recent] [--mode keyword]`
 
 Search Slack, Meet transcripts, Drive, GitHub and pubky.app at once. Use it for any lookup: where did we discuss X, did anyone report Y, who owns Z, what did the call conclude.
 
+A past period is `--before`, with `--after` or `--days` for the start: dates are UTC, `--after` inclusive, `--before` exclusive. `--recent` puts the newest Slack and Meet hits first, and `--mode keyword` matches the words only, without the meaning ranking.
+
 ```
 talos find "nexus watcher lag" --days 90
+talos find "datastore" --after 2025-01-01 --before 2025-04-01
 ```
 
 `talos open <slack link | C0123ABC:1712345678.123456>`
