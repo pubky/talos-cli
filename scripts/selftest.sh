@@ -19,7 +19,7 @@ CANNED = {
     "/v/find": {"results": {"slack": [{"date": "2026-09-01", "who": "alice", "where": "#dev",
                                        "snippet": "watcher lag", "link": "https://slack/x"}]},
                 "text": "== slack\n2026-09-01  alice  #dev\n    watcher lag"},
-    "/v/who": {"text": "Ben Kaufman  (nexus)  github b-kaufman  slack U02BEN"},
+    "/v/who": {"text": "Alice Example  (nexus)  github alice-example  slack U0ALICE"},
     "/v/whosout": {"out": [], "text": "nobody is out"},
     "/v/review": {"confirmed": False, "preview": "request a review from @talosmachina\n  pubky/x#1",
                   "text": "request a review from @talosmachina"},
@@ -207,7 +207,7 @@ t no-arg 2 "usage: talos who" -- who
 # the happy paths
 t find 0 "watcher lag" -- find watcher lag
 t find-json 0 '"results"' -- find watcher --json
-t who 0 b-kaufman -- who ben
+t who 0 alice-example -- who alice
 t whoami 0 "1/30 asks today" -- whoami
 t whoami-writes 0 "writes 0/20" -- whoami
 t skill 0 "the served sheet" -- skill
