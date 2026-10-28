@@ -1223,7 +1223,8 @@ replaces is kept beside it as talos.prev, so `talos rollback` puts a bad release
 
 
 def binary_path():
-    return os.path.realpath(shutil.which("talos") or os.path.abspath(__file__))
+    # the file running, not the first talos on PATH, which can be another install entirely
+    return os.path.realpath(os.path.abspath(__file__))
 
 
 def pinned_release():
@@ -1250,8 +1251,14 @@ def install_binary(data):
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
         os.chmod(tmp, 0o755)
+        # the copy kept for rollback lands by rename, so it is never half written; reinstalling
+        # the same release keeps the one already there
         if os.path.isfile(target):
-            shutil.copy2(target, target + ".prev")
+            with open(target, "rb") as fh:
+                same = fh.read() == data
+            if not same:
+                shutil.copy2(target, tmp + ".prev")
+                os.replace(tmp + ".prev", target + ".prev")
         os.replace(tmp, target)
     except OSError as e:
         die("cannot replace %s: %s" % (target, e.strerror), 1,
@@ -1281,7 +1288,7 @@ def cmd_update(argv):
         die("%s is not the file the installer pins" % url, 1,
             "expected %s, got %s; nothing was replaced" % (sha, got))
     target = install_binary(data)
-    print("talos %s installed at %s; the copy it replaced is %s.prev" % (ver, target, target))
+    print("talos %s installed at %s; the client before it is %s.prev" % (ver, target, target))
 
 
 def cmd_rollback(argv):

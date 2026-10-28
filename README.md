@@ -39,7 +39,8 @@ anything about the team" and it takes it from there.
 Claude Code users can take the plugin route instead: `/plugin marketplace add pubky/talos-cli`,
 then `/plugin install talos`. The plugin carries its own copy of the CLI, so there is nothing to
 install; the agent runs `python3 ${CLAUDE_PLUGIN_ROOT}/bin/talos login` when it needs you to sign
-in.
+in. Claude Code updates that copy (`/plugin marketplace update talos`); `talos update` is for the
+install line.
 
 `talos setup` reruns the registration and refreshes the skill from the desk; `talos doctor`
 checks the whole chain, lists every harness it found and says what to fix. `talos update` fetches
@@ -58,8 +59,16 @@ curl -fsSL https://raw.githubusercontent.com/pubky/talos-cli/v0.4.1/install.sh |
 ```
 
 talos 0.4.1 is sha256 `79f90fe86b3baaa77b6f87696731046aebb739b55b8bb37ac2eacb60c999a67a`, which is
-what `sha256sum ~/.local/bin/talos` prints after the install. What the client trusts, what it
-refuses from the desk, and where your token lives: [docs/security.md](docs/security.md).
+what `sha256sum ~/.local/bin/talos` prints after the install. A tag can be moved by anyone who can
+push here, and the README at that tag moves with it, so keep that line somewhere of your own and
+compare against your copy.
+
+The plugin route has no checksum. Claude Code clones this repo at the ref you added it from, `main`
+unless you say otherwise, and runs the CLI it finds under `plugins/talos/bin/`. To hold it to a
+release, add the marketplace at its tag: `/plugin marketplace add pubky/talos-cli#v0.4.1`.
+
+What the client trusts, what it refuses from the desk, and where your token lives:
+[docs/security.md](docs/security.md).
 
 ### What setup writes, and where
 
