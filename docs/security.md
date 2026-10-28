@@ -26,21 +26,26 @@ exchange for a desk token, and is dropped.
 **The desk, for instructions.** `talos setup` and `talos login` fetch `GET /skill` and install it
 where every coding harness on the machine reads it as instructions. That is the point of the
 desk, and it means whoever controls the desk can tell your agent what to do. The client narrows
-that to prose: a sheet is installed only when it is at most 64 KB, starts with
-`# Talos from the terminal`, has nothing but `talos ...` command lines inside its fenced code
-blocks, and carries no indented block either, which is the other way markdown renders code. A sheet
-that fails any of those is dropped and the copy built into the client is kept, with a line on
-stderr saying so. The YAML frontmatter is always the client's own, never the desk's.
+that to prose. A sheet is installed only when it is at most 64 KB and starts with
+`# Talos from the terminal`, and every line has one of a few shapes: a heading, a `- ` item or a
+paragraph line, none of them indented and none opening a quote, an HTML block or a nested list,
+or a bare ```` ``` ```` fence. A line inside a fence is `talos` followed by letters, digits, spaces,
+double quotes and `#,./:?_~@=+-`, with its quotes balanced. That set has no `;`, `&`, `|`, `$`,
+backtick, backslash, redirection or single quote, so a fenced line pasted into a shell runs `talos`
+and nothing else. A sheet that fails any of this is dropped and the copy built into the client is
+kept, with a line on stderr saying so; `talos skill` applies the same check before it prints. The
+YAML frontmatter is always the client's own, never the desk's.
 
-So a compromised desk can still change the wording of the advice your agent reads. It cannot
-hand your agent a shell command, a URL to fetch, or a payload, which is what turns one
-compromised service into code running on every teammate's laptop.
+So a compromised desk can still change the wording of the advice your agent reads, and a sentence
+or an inline code span can still ask it to run something. What it cannot do is hand your agent a
+code block holding a shell command, the form an agent copies and runs as is.
 
 **The desk, for the terminal.** Everything a verb prints is stripped of control characters
-first (`\n` and `\t` survive). Text from `find`, `open` and `ask` is Slack messages, PR titles and
-doc contents, so it is written by people well outside the team, including anyone who can open a
-PR on a public pubky repo. Without the strip, that text can clear the screen, retitle the window,
-or use a carriage return to hide what a line really says.
+first (`\n` and `\t` survive), and of the bidi overrides and zero-width marks that make a line
+display differently from its bytes. Text from `find`, `open` and `ask` is Slack messages, PR
+titles and doc contents, so it is written by people well outside the team, including anyone who
+can open a PR on a public pubky repo. Without the strip, that text can clear the screen, retitle
+the window, reorder a line, or use a carriage return to hide what a line really says.
 
 **The desk, for MCP.** `talos mcp` is a stdio proxy: it reads one JSON-RPC request from the
 agent, posts it to the desk, and writes back exactly one reply whose `id` matches the request. A
@@ -100,7 +105,8 @@ checksum the README publishes, both of which are immutable once pushed. And an i
 never re-reads `main` on its own: only `talos update`, which the person runs.
 
 **Prose in the served sheet.** See above: the desk writes instructions your agent reads. The
-structural checks stop a command block, fenced or indented; they do not stop a sentence.
+structural checks stop a code block that holds anything but `talos` lines; they do not stop a
+sentence.
 
 **`talos setup` edits harness config.** It appends `[mcp_servers.talos]` to `~/.codex/config.toml`,
 adds a `talos` key to the JSON configs, writes a marked block into the rules files that harnesses

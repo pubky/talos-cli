@@ -210,12 +210,15 @@ def save_config(c):
     os.chmod(CONFIG, 0o600)
 
 
-CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+# C0 and C1 controls, then the bidi overrides, zero-width marks and separators that reorder or hide
+# text; the joiners U+200C and U+200D stay, emoji and several scripts need them
+CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200b\u200e\u200f\u2028-\u202e\u2060-\u2069\ufeff]")
 
 
 def clean(text):
     """What the desk sends is whatever someone wrote in Slack, in a PR title or in a doc, and it
-    lands in a terminal: escape sequences there repaint the screen and hide lines."""
+    lands in a terminal: escape sequences there repaint the screen and hide lines, and bidi
+    controls make a line read differently from what it says."""
     return CONTROL.sub("?", str(text))
 
 
@@ -772,7 +775,11 @@ def cmd_skill(argv):
         r = request("GET", "/skill", stream=True)
     except Desk as ex:
         fail(ex, "skill")
-    print(clean(r.read(SHEET_MAX).decode("utf-8", "replace")).rstrip())
+    body = r.read(SHEET_MAX + 1).decode("utf-8", "replace")
+    if not known_sheet(body):
+        note("talos: the desk served a sheet this client does not recognise, printing the built-in one")
+        body = SKILL_MD
+    print(clean(body).rstrip())
 
 
 def cmd_verbs(argv):
@@ -798,20 +805,28 @@ SHEET_MAX = 64 * 1024
 SHEET_HEAD = "# Talos from the terminal"
 
 
+# The only shapes a sheet line may take. Outside a fence: a heading, a `- ` item or a paragraph line,
+# none of them indented and none opening a quote, an HTML block, a list marker or a fence of their
+# own. Inside one: `talos` and words from a set with no shell separator, substitution, redirection,
+# escape or single quote, so a line pasted into a shell can only ever run `talos`.
+SHEET_LINE = re.compile(r"(#{1,6} |- )?(?![\s><]|```|~~~|[-*+] |\d+[.)](\s|$))\S.*")
+SHEET_CMD = re.compile(r'talos( [A-Za-z0-9 "#,./:?_~@=+-]+)?')
+
+
 def known_sheet(body):
     """The sheet is installed where every harness reads it as instructions, so a desk that is not
-    the desk cannot get a shell command or a payload past here: what the desk serves is headings,
-    prose, and fenced blocks holding nothing but `talos` command lines."""
-    if not body or len(body) > SHEET_MAX or not body.lstrip().startswith(SHEET_HEAD):
+    the desk cannot get a code block past here that holds anything but `talos` command lines."""
+    if not body or len(body) > SHEET_MAX or not body.startswith(SHEET_HEAD + "\n"):
         return False
     fenced = False
     for line in body.splitlines():
-        if line.startswith("```"):
+        if line == "```":
             fenced = not fenced
-        elif fenced and line.strip() and not line.startswith("talos "):
+        elif fenced:
+            if not SHEET_CMD.fullmatch(line) or line.count('"') % 2:
+                return False
+        elif line and not SHEET_LINE.fullmatch(line):
             return False
-        elif not fenced and line.strip() and line.startswith(("    ", "\t")):
-            return False  # markdown renders an indented block as code too, fence or no fence
     return not fenced
 
 
