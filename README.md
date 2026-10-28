@@ -128,6 +128,8 @@ for any "where did we discuss", "did anyone report", "who owns", "what did the c
 judgement; `review` after opening a PR. The same verbs are MCP tools (`talos_find`, `talos_who`,
 `talos_issue`, and so on), and the readable knowledge skills are MCP resources
 (`talos://skills/<name>`). A write tool without `yes: true` returns the preview instead of acting.
+The agent sets `yes` itself, so on this path the human check is your harness's own approval
+prompt for MCP tool calls: leave it on for the talos write tools.
 
 ## Details
 
