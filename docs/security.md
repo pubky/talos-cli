@@ -16,7 +16,10 @@ the `talos-desk` skill in `pubky/talos-agent`.
 The token is a bearer token for one person. Anyone who reads that file can act as you: file
 issues, book calls, spend your agent turns. Rotate it by running `talos login` again, which makes
 the previous one stop working. `TALOS_TOKEN` in the environment overrides the file, which is how
-CI or a container gets one without writing it to disk.
+CI or a container gets one without writing it to disk. The stored token goes only to the stored
+desk address: a `--url` or `TALOS_URL` naming any other desk gets a token only from `TALOS_TOKEN`.
+The client does not follow HTTP redirects from the desk, since urllib would carry the token along
+to whatever address the redirect names.
 
 The GitHub token from `talos login` is never written anywhere. It goes to the desk once, in
 exchange for a desk token, and is dropped.
@@ -66,15 +69,17 @@ takes a release, not a commit to one line. The host comes from `urllib.parse.url
 
 A desk at a new address starts with no credentials. When the pointer moves the desk, the client
 drops the stored token, writes the new address, prints one line saying where the desk went, and
-stops: `talos login` has to run again, and it is that second run that decides to hand the new
+stops: `talos login` has to run again (a `TALOS_TOKEN` in that run is dropped too), and it is that second run that decides to hand the new
 address a GitHub device token. Neither token ever follows an address the client did not already
 have.
 
 It is read by `talos login` and `talos doctor` only, and only when the stored desk does not answer
-`/health`. No other verb talks to this repo at run time.
+`/health`. No other verb talks to this repo at run time. A pointer file that does not answer, or
+whose first line is not a URL, moves nothing.
 
 `--url` and `TALOS_URL` are not checked this way. Those are your own choice, made on your own
-command line, and `--url` applies to whatever verb you pass it to.
+command line, and `--url` applies to whatever verb you pass it to. The stored token still does not
+follow them to a desk it was not issued by.
 
 **Nothing is read without an end.** Every response the client reads has a cap: 1 MB for a JSON
 body from the desk or from GitHub, 64 KB for the capability sheet, 8 MB for an MCP reply, 1 MB per

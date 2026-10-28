@@ -277,10 +277,10 @@ def pointer_url():
     try:
         raw = urllib.request.urlopen(POINTER_URL, timeout=15).read(POINTER_MAX).decode("utf-8", "replace")
     except Exception:
-        return DEFAULT_URL
+        return ""
     line = raw.strip().splitlines()[0].strip() if raw.strip() else ""
     if not line.startswith("http"):
-        return DEFAULT_URL  # the file is broken, and the built-in address is the safe answer
+        return ""
     if not pointable(line):
         note("talos: the pointer file names %s, which is not a desk this client may move to (%s or "
              "loopback); staying where you are" % (line, ", ".join(DESK_HOSTS)))
@@ -312,6 +312,7 @@ def adopt(c, old, found):
     if old:
         MOVED = found
         c.pop("token", None)
+        os.environ.pop("TALOS_TOKEN", None)
     save_config(c)
     if old:
         note("talos: the desk moved to %s; that address gets no token until you run `talos login`" % found)
@@ -333,19 +334,29 @@ def resolve_url(refresh=False):
         return url
     if not refresh:
         return url or DEFAULT_URL
-    found = pointer_url().rstrip("/")
+    # a pointer file that says nothing usable is no move: keep the stored desk, else the built-in one
+    found = (pointer_url() or url or DEFAULT_URL).rstrip("/")
     if found and found != url and (not url or health(found)):
         return adopt(c, url, found)
     return url
 
 
+def token_for(url):
+    """The stored token was issued by the stored desk, so any other address gets one only from
+    TALOS_TOKEN, which whoever set it paired with that address themselves."""
+    c = load_config()
+    if os.environ.get("TALOS_TOKEN"):
+        return os.environ["TALOS_TOKEN"]
+    return c.get("token") if (c.get("url") or DEFAULT_URL).rstrip("/") == url else None
+
+
 def endpoint():
-    tok = os.environ.get("TALOS_TOKEN") or load_config().get("token")
-    if not tok:
-        die("not logged in", 4, "run `talos login` and complete the GitHub prompt it prints")
     url = resolve_url()
     if not url:
         die("no desk url, and the pointer file did not answer", 1, "talos login --url <desk url>")
+    tok = token_for(url)
+    if not tok:
+        die("not logged in at %s" % url, 4, "run `talos login` and complete the GitHub prompt it prints")
     return url, tok
 
 
@@ -356,7 +367,7 @@ class Desk(Exception):
 
 
 def version_tuple(v):
-    """None when it is not a version, so an unreadable minimum is never silently satisfied."""
+    """None when it is not a version; the caller decides what an unreadable one means."""
     try:
         parts = tuple(int(x) for x in str(v).strip().split("."))
     except (ValueError, AttributeError):
@@ -375,14 +386,27 @@ def min_client(r):
         die("this client is %s and the desk needs %s" % (VERSION, minv), 1, "run `talos update`")
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """urllib re-sends every header on a redirect, the bearer token included, to wherever the
+    Location points. A desk has no reason to redirect, so a redirect is an answer, not a hop."""
+    def redirect_request(self, *a):
+        return None
+
+
+DESK = urllib.request.build_opener(NoRedirect)
+
+
 def open_url(method, url, body=None, headers=None, timeout=120):
     h = {"Content-Type": "application/json", "User-Agent": "talos-cli/" + VERSION}
     h.update(headers or {})
     req = urllib.request.Request(url, data=json.dumps(body).encode() if body is not None else None, headers=h)
     req.get_method = lambda: method
     try:
-        return urllib.request.urlopen(req, timeout=timeout)
+        return DESK.open(req, timeout=timeout)
     except urllib.error.HTTPError as e:
+        if 300 <= e.code < 400:
+            die("the desk at %s answered with a redirect, which this client does not follow" % url, 1,
+                "check the desk url with `talos doctor`")
         try:
             payload = json.loads(read_capped(e, JSON_MAX))
         except (ValueError, RecursionError):
@@ -1191,8 +1215,7 @@ def check(label, ok, detail, fix):
 
 def cmd_doctor(argv):
     url = resolve_url(refresh=True)
-    c = load_config()
-    tok = os.environ.get("TALOS_TOKEN") or c.get("token")
+    tok = token_for(url) if url else None
     good = check("config file", os.path.isfile(CONFIG), CONFIG, "talos login")
     good &= check("desk url", bool(url), url or "unset", "talos login --url <desk url>")
     good &= check("token", bool(tok), "present" if tok else "missing", "talos login")
@@ -1333,9 +1356,8 @@ MCP_MAX = 8 * 1024 * 1024
 
 
 def cmd_mcp(argv):
-    c = load_config()
-    tok = os.environ.get("TALOS_TOKEN") or c.get("token")
-    url = resolve_url() if tok else ""
+    url = resolve_url()
+    tok = token_for(url)
     out = sys.stdout
 
     def answer(mid, message, code=-32000):
@@ -1365,7 +1387,7 @@ def cmd_mcp(argv):
                                               "Content-Type": "application/json",
                                               "User-Agent": "talos-cli/" + VERSION})
         try:
-            r = urllib.request.urlopen(req, timeout=20 * 60)
+            r = DESK.open(req, timeout=20 * 60)
             body = r.read(MCP_MAX + 1)
             minv = r.headers.get("X-Talos-Min-Client")
             want = version_tuple(minv) if minv else None
