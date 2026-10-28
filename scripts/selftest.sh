@@ -6,13 +6,14 @@
 set -u
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 CLI="$HERE/talos"
-T="$(mktemp -d)"
-trap 'kill ${V2:-0} ${V1:-0} ${V3:-0} ${GH:-0} 2>/dev/null; rm -rf "$T"' EXIT
+T="$(mktemp -d)" || exit 1
+# no pid yet must mean no kill: `kill 0` is the whole process group, the caller's included
+trap 'kill ${V2:-} ${V1:-} ${V3:-} ${GH:-} 2>/dev/null; rm -rf "$T"' EXIT
 P2=$((17600 + RANDOM % 400)); P1=$((18100 + RANDOM % 400))
 
 cat > "$T/stub.py" <<'EOF'
 """A desk with canned answers. argv: <port> <v01|v02> <mode file> [bind address]."""
-import json, socket, struct, sys
+import json, os, socket, struct, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 MODE = sys.argv[2]
 CANNED = {
@@ -169,7 +170,9 @@ class H(BaseHTTPRequestHandler):
 class Quiet(HTTPServer):
     def handle_error(self, *a):
         pass   # a client that stops reading an oversize body is the point of one of the tests
-Quiet((sys.argv[4] if len(sys.argv) > 4 else "127.0.0.1", int(sys.argv[1])), H).serve_forever()
+srv = Quiet((sys.argv[4] if len(sys.argv) > 4 else "127.0.0.1", int(sys.argv[1])), H)
+open(os.environ["READY"], "w").close()
+srv.serve_forever()
 EOF
 
 echo unset > "$T/mode"
@@ -177,7 +180,7 @@ echo unset > "$T/mode"
 # a stub GitHub: the client id doubles as the scenario the device flow should play out
 cat > "$T/github.py" <<'EOF'
 """GitHub's device endpoints, faked. argv: <port> <state file>."""
-import json, sys, urllib.parse
+import json, os, sys, urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 SEEN = {}
 class H(BaseHTTPRequestHandler):
@@ -207,17 +210,25 @@ class H(BaseHTTPRequestHandler):
         if mode == "pending" and SEEN[mode] == 1:
             return self.reply({"error": "authorization_pending"})
         return self.reply({"access_token": "gho_fake"})
-HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+srv = HTTPServer(("127.0.0.1", int(sys.argv[1])), H)
+open(os.environ["READY"], "w").close()
+srv.serve_forever()
 EOF
+# each server touches $READY once it holds its port. Until then something else may be answering
+# there, and the suite would test that instead, so a server that dies first stops the run.
+up() { # up <ready file> <pid>
+  for _ in $(seq 40); do [ -e "$1" ] && return 0; kill -0 "$2" 2>/dev/null || break; sleep 0.25; done
+  echo "FAIL a stub server did not start (port taken?): $1"; exit 1
+}
 PG=$((18600 + RANDOM % 400))
-python3 "$T/github.py" "$PG" & GH=$!
+READY="$T/up-gh" python3 "$T/github.py" "$PG" & GH=$!
 export TALOS_GITHUB_OAUTH="http://127.0.0.1:$PG"
 
-python3 "$T/stub.py" "$P2" v02 "$T/mode" & V2=$!
+READY="$T/up-v2" python3 "$T/stub.py" "$P2" v02 "$T/mode" & V2=$!
 # the same stub on another loopback address, so the pointer file can name a live plain-http desk
-python3 "$T/stub.py" "$P2" v02 "$T/mode" 127.0.0.2 & V3=$!
-python3 "$T/stub.py" "$P1" v01 "$T/mode" & V1=$!
-for _ in $(seq 40); do curl -fsS "http://127.0.0.1:$P2/health" >/dev/null 2>&1 && break; sleep 0.25; done
+READY="$T/up-v3" python3 "$T/stub.py" "$P2" v02 "$T/mode" 127.0.0.2 & V3=$!
+READY="$T/up-v1" python3 "$T/stub.py" "$P1" v01 "$T/mode" & V1=$!
+up "$T/up-gh" "$GH"; up "$T/up-v2" "$V2"; up "$T/up-v3" "$V3"; up "$T/up-v1" "$V1"
 
 export XDG_CONFIG_HOME="$T/config" TALOS_TOKEN=tdk_stub TALOS_URL="http://127.0.0.1:$P2"
 PASS=0; FAIL=0
@@ -660,10 +671,17 @@ s = open(sys.argv[1]).read()
 sys.exit(0 if re.search(r"(?m)^TALOS_VERSION=\"[0-9]+(\.[0-9]+)*\"$", s)
          and re.search(r"(?m)^TALOS_SHA256=\"[0-9a-f]{64}\"$", s) else 1)' "$HERE/install.sh"
 
-# every file under plugins/ is what sync-plugin.sh writes today, manifest and skill included
-cp -a "$HERE/plugins/talos" "$T/plugin-before"
-"$HERE/scripts/sync-plugin.sh" >/dev/null 2>&1
-ok "the plugin is what sync-plugin.sh writes" diff -r -q "$T/plugin-before" "$HERE/plugins/talos"
+# every file under plugins/ is what sync-plugin.sh writes today, manifest and skill included. It
+# runs in a copy: the tree under test is only read, so a stale plugin fails every run until fixed
+mkdir -p "$T/synced/scripts" && cp "$CLI" "$T/synced/talos" && cp "$HERE/scripts/sync-plugin.sh" "$T/synced/scripts/" \
+  && cp -a "$HERE/plugins" "$T/synced/plugins"
+ok "sync-plugin.sh runs" sh -c '"$1" >/dev/null' _ "$T/synced/scripts/sync-plugin.sh"
+ok "the plugin is what sync-plugin.sh writes" diff -r -q "$T/synced/plugins/talos" "$HERE/plugins/talos"
+# the one plugin file nobody generates decides what the harness runs
+ok "the plugin's MCP server is its own copy of the CLI" python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if d == {"talos": {"command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/bin/talos", "mcp"]}} else 1)' \
+  "$HERE/plugins/talos/.mcp.json"
 
 "$CLI" setup --print-mcp > "$T/print.json" 2>/dev/null
 ok "--print-mcp is the stdio block" python3 -c 'import json,sys
@@ -682,9 +700,13 @@ SHA="$(sha256sum "$REPO/v$VER/talos" | cut -d' ' -f1)"
 SHA999="$(sha256sum "$REPO/v9.9.9/talos" | cut -d' ' -f1)"
 ZERO="$(printf '0%.0s' $(seq 64))"
 PR=$((19100 + RANDOM % 400))
-python3 -m http.server "$PR" --bind 127.0.0.1 -d "$REPO" >/dev/null 2>&1 & RP=$!
-trap 'kill ${V2:-0} ${V1:-0} ${V3:-0} ${GH:-0} ${RP:-0} 2>/dev/null; rm -rf "$T"' EXIT
-for _ in $(seq 40); do curl -fsS "http://127.0.0.1:$PR/main/" >/dev/null 2>&1 && break; sleep 0.25; done
+READY="$T/up-rp" python3 -c 'import functools, http.server, os, sys
+srv = http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])),
+    functools.partial(http.server.SimpleHTTPRequestHandler, directory=sys.argv[2]))
+open(os.environ["READY"], "w").close()
+srv.serve_forever()' "$PR" "$REPO" >/dev/null 2>&1 & RP=$!
+trap 'kill ${V2:-} ${V1:-} ${V3:-} ${GH:-} ${RP:-} 2>/dev/null; rm -rf "$T"' EXIT
+up "$T/up-rp" "$RP"
 
 installer() { # installer <version> <sha256>
   python3 - "$HERE/install.sh" "$REPO/main/install.sh" "$1" "$2" <<'EOF'
@@ -696,12 +718,14 @@ open(sys.argv[2], "w").write(src)
 EOF
 }
 run_installer() { # run_installer ; $IBIN and $IHOME are the fake install
-  env -u TALOS_TOKEN PATH=/usr/bin:/bin HOME="$IHOME" XDG_CONFIG_HOME="$T/config" \
-    TALOS_REPO_RAW="http://127.0.0.1:$PR" TALOS_BIN_DIR="$IBIN" TALOS_URL="http://127.0.0.1:$P2" \
+  env -u TALOS_TOKEN PATH="${IPATH:-/usr/bin:/bin}" HOME="$IHOME" XDG_CONFIG_HOME="$T/config" \
+    TALOS_REPO_RAW="http://127.0.0.1:$PR" TALOS_BIN_DIR="${IDIR:-$IBIN}" TALOS_URL="http://127.0.0.1:$P2" \
     sh "$REPO/main/install.sh" 2>&1
 }
-IHOME="$T/installhome"; IBIN="$IHOME/bin"; mkdir -p "$IBIN"
+IHOME="$T/installhome"; IBIN="$IHOME/bin"; mkdir -p "$IBIN" "$T/decoy"
 printf '#!/bin/sh\necho old talos\n' > "$IBIN/talos"; chmod 755 "$IBIN/talos"
+# another talos earlier on PATH, which neither the installer nor update may mistake for this one
+printf '#!/bin/sh\necho decoy\n' > "$T/decoy/talos"; chmod 755 "$T/decoy/talos"
 
 installer "$VER" "$ZERO"
 out="$(run_installer)"; rc=$?
@@ -711,10 +735,27 @@ if [ "$rc" = 1 ] && printf '%s' "$out" | grep -q "not the file this installer pi
 else echo "FAIL a checksum mismatch installed something anyway: exit $rc"; printf '%s\n' "$out" | sed 's/^/    /'; FAIL=$((FAIL+1)); fi
 
 installer "$VER" "$SHA"
-out="$(run_installer)"; rc=$?
+out="$(IPATH="$T/decoy:/usr/bin:/bin" run_installer)"; rc=$?
 if [ "$rc" = 0 ] && cmp -s "$IBIN/talos" "$CLI" && grep -q "old talos" "$IBIN/talos.prev"; then
   PASS=$((PASS+1))
 else echo "FAIL the pinned release did not install: exit $rc"; printf '%s\n' "$out" | sed 's/^/    /'; FAIL=$((FAIL+1)); fi
+ok "setup registered the client it installed, not the first talos on PATH" \
+  grep -qF "command = \"$IBIN/talos\"" "$IHOME/.codex/config.toml"
+
+out="$(run_installer)"; rc=$?
+ok "reinstalling the same release keeps the previous client" grep -q "old talos" "$IBIN/talos.prev"
+
+out="$(cd "$T" && IDIR=relbin run_installer)"; rc=$?
+if [ "$rc" = 1 ] && printf '%s' "$out" | grep -q "must be an absolute path" && [ ! -e "$T/relbin" ]; then
+  PASS=$((PASS+1))
+else echo "FAIL a relative TALOS_BIN_DIR was installed into: exit $rc"; printf '%s\n' "$out" | sed 's/^/    /'; FAIL=$((FAIL+1)); fi
+
+mkdir -p "$REPO/v8.8.8"; head -c 5000000 /dev/zero > "$REPO/v8.8.8/talos"
+installer 8.8.8 "$(sha256sum "$REPO/v8.8.8/talos" | cut -d' ' -f1)"
+out="$(run_installer)"; rc=$?
+if [ "$rc" != 0 ] && cmp -s "$IBIN/talos" "$CLI" && [ "$(find "$IBIN" -name '.talos.*' | wc -l)" = 0 ]; then
+  PASS=$((PASS+1))
+else echo "FAIL the installer took a release over 4 MB: exit $rc"; printf '%s\n' "$out" | sed 's/^/    /'; FAIL=$((FAIL+1)); fi
 
 talos_at() { PATH=/usr/bin:/bin HOME="$IHOME" XDG_CONFIG_HOME="$T/config" \
   TALOS_REPO_RAW="http://127.0.0.1:$PR" "$IBIN/talos" "$@"; }
@@ -735,6 +776,23 @@ else echo "FAIL update did not install the pinned release: exit $rc"; printf '%s
 out="$(talos_at rollback 2>&1)"; rc=$?
 if [ "$rc" = 0 ] && [ "$(talos_at --version)" = "talos $VER" ]; then PASS=$((PASS+1))
 else echo "FAIL rollback did not put the previous client back: exit $rc $out"; FAIL=$((FAIL+1)); fi
+
+# update replaces the file that is running, whatever else PATH finds first
+out="$(PATH="$T/decoy:/usr/bin:/bin" HOME="$IHOME" XDG_CONFIG_HOME="$T/config" \
+  TALOS_REPO_RAW="http://127.0.0.1:$PR" "$IBIN/talos" update 2>&1)"; rc=$?
+if [ "$rc" = 0 ] && [ "$(talos_at --version)" = "talos 9.9.9" ] && grep -q decoy "$T/decoy/talos"; then
+  PASS=$((PASS+1))
+else echo "FAIL update replaced something other than the running client: exit $rc"; printf '%s\n' "$out" | sed 's/^/    /'; FAIL=$((FAIL+1)); fi
+talos_at update --force >/dev/null 2>&1
+ok "updating to the release already installed keeps the previous client" grep -q "VERSION = \"$VER\"" "$IBIN/talos.prev"
+
+# the rollback copy replaces whatever sits at talos.prev, a symlink included, and writes through nothing
+echo precious > "$T/precious"; ln -sf "$T/precious" "$IBIN/talos.prev"
+installer "$VER" "$SHA"
+out="$(run_installer)"; rc=$?
+if [ "$rc" = 0 ] && [ "$(cat "$T/precious")" = precious ] && [ ! -L "$IBIN/talos.prev" ] \
+   && grep -q 'VERSION = "9.9.9"' "$IBIN/talos.prev"; then PASS=$((PASS+1))
+else echo "FAIL the installer wrote through a symlinked talos.prev: exit $rc"; printf '%s\n' "$out" | sed 's/^/    /'; FAIL=$((FAIL+1)); fi
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

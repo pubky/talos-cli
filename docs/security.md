@@ -94,10 +94,14 @@ unguessable, so a second installer running at the same time cannot decide what t
 installs.
 
 The file it replaces is kept as `talos.prev`, so a release that misbehaves is one `talos rollback`
-(or one `mv`) away from the previous one.
+(or one `mv`) away from the previous one. That copy also lands by rename, so it is never half
+written and a symlink in its place is replaced rather than written through, and reinstalling the
+release that is already there leaves it alone. `talos rollback` checks nothing about it: whoever
+can write that directory can write `talos` itself.
 
 `talos update` is the same flow from inside the CLI: it reads the version and checksum from
-`install.sh` on `main`, downloads that tag's `talos`, verifies it, and swaps it in by rename.
+`install.sh` on `main`, downloads that tag's `talos`, verifies it, and swaps it in by rename over
+the file that is running.
 
 ## Accepted risks
 
@@ -105,9 +109,18 @@ The file it replaces is kept as `talos.prev`, so a release that misbehaves is on
 `main`, so whoever can write to `main` can point a new reader at a different release. That is the
 same power as writing the client itself, and it is what the tag and checksum cannot remove: a
 checksum can only bind a payload to a manifest, not tell you the manifest is honest. Two things
-narrow it. A reader who wants an end to end pin takes `install.sh` from a tag and compares the
-checksum the README publishes, both of which are immutable once pushed. And an installed client
-never re-reads `main` on its own: only `talos update`, which the person runs.
+narrow it. A reader who wants an end to end pin keeps the checksum the README publishes for a
+release and compares what got installed against that copy. Taking `install.sh` from a tag helps
+only while the tag stays put: a git tag can be moved by anyone who can push to this repo, and the
+tag carries its own README. And an installed client never re-reads `main` on its own: only
+`talos update`, which the person runs.
+
+**The plugin route has no pin.** The Claude Code plugin runs the CLI under `plugins/talos/bin/`
+from the ref its marketplace was added at, `main` by default. Nothing checks that copy against the
+release checksum; it is exactly as trusted as the commit Claude Code cloned. An installed plugin
+gets new code when its version changes and the user updates it, or on its own if they turned
+auto-update on. Adding the marketplace at a release tag (`pubky/talos-cli#v0.x.y`) holds it
+there, with the same caveat about moved tags.
 
 **Prose in the served sheet.** See above: the desk writes instructions your agent reads. The
 structural checks stop a code block that holds anything but `talos` lines; they do not stop a
