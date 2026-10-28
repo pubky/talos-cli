@@ -49,9 +49,12 @@ the window, reorder a line, or use a carriage return to hide what a line really 
 
 **The desk, for MCP.** `talos mcp` is a stdio proxy: it reads one JSON-RPC request from the
 agent, posts it to the desk, and writes back exactly one reply whose `id` matches the request. A
-response body with a second frame in it, or with an id the agent did not ask about, is dropped
-and reported as an error. Without that check, a desk could answer a `tools/list` with an extra
-frame the agent reads as a tool result.
+response body with a second frame in it, an id the agent did not ask about (or one of another
+type), a request of the desk's own, NaN, or more than 8 MB is dropped and reported as an error.
+So is a body cut off halfway: that request fails and the proxy keeps serving. Without that check,
+a desk could answer a `tools/list` with an extra frame the agent reads as a tool result. A line
+from the agent that is not one JSON object with a string or integer id (a batch, a null id,
+broken JSON) is answered with an error and never forwarded.
 
 **The pointer file, to move the desk and nothing else.** `desk-url.txt` in this repo names where the
 desk lives, so moving it is one commit. Three things bound what that commit can do.

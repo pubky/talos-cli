@@ -36,6 +36,7 @@ Single file, Python 3.8+, standard library only. Source: https://github.com/pubk
 """
 import getpass
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -1290,6 +1291,11 @@ def cmd_mcp(argv):
     tok = os.environ.get("TALOS_TOKEN") or c.get("token")
     url = resolve_url() if tok else ""
     out = sys.stdout
+
+    def answer(mid, message, code=-32000):
+        out.write(json.dumps({"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": message}}) + "\n")
+        out.flush()
+
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -1297,13 +1303,16 @@ def cmd_mcp(argv):
         try:
             msg = json.loads(line)
         except ValueError:
+            answer(None, "not JSON: send one JSON-RPC message per line", -32700)
             continue
-        mid = msg.get("id")
+        # a batch, a bare value or a null id leaves nothing to match the reply against
+        mid = msg.get("id") if isinstance(msg, dict) else None
+        if not isinstance(msg, dict) or isinstance(mid, bool) or not isinstance(msg.get("id", 0), (str, int)):
+            answer(None, "send one JSON-RPC object per line, with a string or integer id", -32600)
+            continue
         if not url or not tok:
             if mid is not None:
-                out.write(json.dumps({"jsonrpc": "2.0", "id": mid, "error": {
-                    "code": -32000, "message": "talos is not logged in: run `talos login` in a terminal"}}) + "\n")
-                out.flush()
+                answer(mid, "talos is not logged in: run `talos login` in a terminal")
             continue
         req = urllib.request.Request(url.rstrip("/") + "/mcp", data=json.dumps(msg).encode(),
                                      headers={"Authorization": "Bearer " + tok,
@@ -1311,46 +1320,49 @@ def cmd_mcp(argv):
                                               "User-Agent": "talos-cli/" + VERSION})
         try:
             r = urllib.request.urlopen(req, timeout=20 * 60)
-            payload = r.read(MCP_MAX).decode("utf-8", "replace")
+            body = r.read(MCP_MAX + 1)
             minv = r.headers.get("X-Talos-Min-Client")
             want = version_tuple(minv) if minv else None
             if want and want > version_tuple(VERSION):
                 # the agent never sees stderr, so the refusal has to be the answer to its request
                 if mid is not None:
-                    out.write(json.dumps({"jsonrpc": "2.0", "id": mid, "error": {
-                        "code": -32000, "message": "talos is %s and the desk needs %s: run `talos update`"
-                                                   % (VERSION, minv)}}) + "\n")
-                    out.flush()
+                    answer(mid, "talos is %s and the desk needs %s: run `talos update`" % (VERSION, minv))
                 sys.stderr.write("talos: this client is %s and the desk needs %s; run `talos update`\n"
                                  % (VERSION, clean(minv)))
                 sys.exit(1)
-            if r.getcode() == 202 or mid is None:
+            if mid is None:
                 continue
-            # one request, one reply: a body carrying a second frame would reach the agent as the
-            # answer to something it never asked
+            if len(body) > MCP_MAX:
+                answer(mid, "the desk sent more than %d bytes" % MCP_MAX)
+                continue
+            # one request, one reply: a second frame, a request of the desk's own, or an id that is
+            # only loosely equal would reach the agent as the answer to something it never asked
             try:
-                reply = json.loads(payload)
+                reply = json.loads(body.decode("utf-8", "replace"))
+                if not (isinstance(reply, dict) and type(reply.get("id")) is type(mid) and reply["id"] == mid
+                        and ("result" in reply) != ("error" in reply)):
+                    raise ValueError
+                # NaN and Infinity are not JSON to the agent's parser
+                frame = json.dumps(reply, allow_nan=False)
             except ValueError:
-                reply = None
-            if not isinstance(reply, dict) or reply.get("id") != mid:
-                reply = {"jsonrpc": "2.0", "id": mid, "error": {
-                    "code": -32000, "message": "the desk did not answer this request"}}
-            out.write(json.dumps(reply) + "\n")
+                answer(mid, "the desk did not answer this request")
+                continue
+            out.write(frame + "\n")
             out.flush()
         except urllib.error.HTTPError as e:
             try:
                 err = json.loads(e.read(JSON_MAX).decode("utf-8", "replace")).get("error", str(e.reason))
-            except ValueError:
+            except (ValueError, AttributeError):
                 err = str(e.reason)
             if mid is not None:
-                out.write(json.dumps({"jsonrpc": "2.0", "id": mid, "error": {
-                    "code": -32000, "message": "desk %s: %s" % (e.code, err)}}) + "\n")
-                out.flush()
+                answer(mid, "desk %s: %s" % (e.code, err))
         except urllib.error.URLError as e:
             if mid is not None:
-                out.write(json.dumps({"jsonrpc": "2.0", "id": mid, "error": {
-                    "code": -32000, "message": "cannot reach the desk: %s" % e.reason}}) + "\n")
-                out.flush()
+                answer(mid, "cannot reach the desk: %s" % e.reason)
+        except (OSError, http.client.HTTPException) as e:
+            # a body cut off mid-read fails this request, not the server the harness started
+            if mid is not None:
+                answer(mid, "the desk dropped this request: %s" % e)
 
 
 # ---------- entry ----------
