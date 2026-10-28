@@ -36,7 +36,7 @@ ERRORS = {
     "/v/open": (429, {"error": "61 read calls in the last minute (cap 60)", "hint": "wait", "code": "over_budget"}),
     "/v/result": (400, {"error": "run_id does not look right", "hint": "talos result <run-id>", "code": "bad_args"}),
     "/v/delegate": (500, {"error": "the desk fell over", "hint": "tell @SHAcollision", "code": "error"}),
-    "/v/meet_list": (401, {"error": "no or unknown token", "hint": "talos login <token>", "code": "no_token"}),
+    "/v/meet_list": (401, {"error": "no or unknown token", "hint": "talos login --token", "code": "no_token"}),
 }
 # /mcp bodies a desk must not get to hand the agent as the answer to its request id 1
 MCP_BODIES = {
@@ -80,10 +80,12 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/login/config":
             if self.mode() == "unset":
                 return self.reply(503, {"error": "this desk has no GitHub OAuth app configured",
-                                        "hint": "device login not configured yet; use talos login <token>",
+                                        "hint": "device login not configured yet; use talos login --token",
                                         "code": "error"})
             return self.reply(200, {"github_client_id": self.mode(), "org": "pubky"})
         if self.path == "/me":
+            if self.headers.get("Authorization") == "Bearer tdk_bad":
+                return self.reply(401, {"error": "no or unknown token", "hint": "talos login", "code": "no_token"})
             return self.reply(200, {"handle": "tester", "asks_today": 1, "asks_per_day": 30,
                                     "asks_global_today": 3, "asks_global_per_day": 200,
                                     "resets_at": "2026-09-15T00:00:00Z", "writes_today": 0, "writes_per_day": 20,
@@ -298,12 +300,15 @@ t legacy-review-yes 0 "queued\|on it" -- review pubky/x#1 --yes
 t legacy-missing 6 "does not have who yet" -- who ben
 t legacy-missing-remember 6 "ask Chris to deploy v0.2" -- remember "a fact" --yes
 
-# login writes a 0600 config and refreshes the skill from the desk
+# login writes a 0600 config, even over one that was 0644, and refreshes the skill from the desk
 export TALOS_URL="http://127.0.0.1:$P2" HOME="$T/fakehome"
-mkdir -p "$T/fakehome"
-"$CLI" login tdk_stub --url "http://127.0.0.1:$P2" >/dev/null 2>&1
+mkdir -p "$T/fakehome" "$T/config" && mkdir -m 700 "$T/config/talos"
+echo '{}' > "$T/config/talos/config.json"; chmod 644 "$T/config/talos/config.json"
+echo tdk_stub | "$CLI" login --token --url "http://127.0.0.1:$P2" >/dev/null 2>&1
 [ "$(stat -c %a "$T/config/talos/config.json" 2>/dev/null)" = 600 ] \
   && PASS=$((PASS+1)) || { echo "FAIL config mode"; FAIL=$((FAIL+1)); }
+[ -z "$(find "$T/config/talos" -maxdepth 1 -name '.config-*')" ] \
+  && PASS=$((PASS+1)) || { echo "FAIL login left a temp file next to the config"; FAIL=$((FAIL+1)); }
 grep -q "the served sheet" "$T/fakehome/.claude/skills/talos/SKILL.md" 2>/dev/null \
   && PASS=$((PASS+1)) || { echo "FAIL skill not refreshed from the desk"; FAIL=$((FAIL+1)); }
 grep -q "^name: talos" "$T/fakehome/.claude/skills/talos/SKILL.md" 2>/dev/null \
@@ -320,6 +325,46 @@ out=$(printf '' | "$CLI" login --token 2>&1); rc=$?
 out=$(echo tdk_stub | "$CLI" login --token 2>&1); rc=$?
 [ $rc = 0 ] && printf '%s' "$out" | grep -q "logged in as @tester" \
   && PASS=$((PASS+1)) || { echo "FAIL login --token: exit $rc"; FAIL=$((FAIL+1)); }
+
+# a token is never taken from argv, in either spelling, and one the desk refuses is never stored
+cp "$T/config/talos/config.json" "$T/config.before"
+t login-argv-token 2 "takes no token argument" -- login tdk_argv
+t login-token-value 2 "takes no token argument" -- login --token tdk_argv
+out=$(echo tdk_bad | "$CLI" login --token 2>&1); rc=$?
+[ $rc = 4 ] && cmp -s "$T/config.before" "$T/config/talos/config.json" \
+  && PASS=$((PASS+1)) || { echo "FAIL a refused token changed the config: exit $rc"; FAIL=$((FAIL+1)); }
+
+# on a terminal the token comes from the no-echo prompt
+out=$(python3 - "$CLI" <<'EOF'
+import os, pty, signal, sys
+signal.alarm(30)
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv(sys.argv[1], [sys.argv[1], "login", "--token"])
+buf = b""
+while b"not echoed" not in buf:
+    chunk = os.read(fd, 1024)
+    if not chunk:
+        break
+    buf += chunk
+os.write(fd, b"tdk_tty\n")
+while True:
+    try:
+        chunk = os.read(fd, 1024)
+    except OSError:
+        break
+    if not chunk:
+        break
+    buf += chunk
+_, st = os.waitpid(pid, 0)
+sys.stdout.write(buf.decode("utf-8", "replace"))
+sys.exit(os.WEXITSTATUS(st))
+EOF
+); rc=$?
+[ $rc = 0 ] && printf '%s' "$out" | grep -q "logged in as @tester" && ! printf '%s' "$out" | grep -q tdk_tty \
+  && grep -q tdk_tty "$T/config/talos/config.json" \
+  && PASS=$((PASS+1)) || { echo "FAIL login on a terminal: exit $rc"; printf '%s\n' "$out" | sed 's/^/    /'; FAIL=$((FAIL+1)); }
+
 echo ok > "$T/mode"
 t login-device 0 "Open https://github.com/login/device and enter code ABCD-1234" -- login
 t login-device-handle 0 "logged in as @tester" -- login
@@ -552,10 +597,13 @@ sys.exit(0 if eval(sys.argv[2]) else 1)' "$1" "$2"
 # a home where every harness is installed, plus files the user already had
 mkdir -p "$H/all/.cursor" "$H/all/.codeium/windsurf/memories" "$H/all/.gemini" "$H/all/.config/opencode"
 printf '{\n    "mcpServers": {\n        "other": {\n            "command": "npx"\n        }\n    }\n}\n' > "$H/all/.cursor/mcp.json"
-printf '{\n  "theme": "dark"\n}\n' > "$H/all/.gemini/settings.json"
+chmod 600 "$H/all/.cursor/mcp.json"
+mkdir -p "$H/all/dotfiles"
+printf '{\n  "theme": "dark"\n}\n' > "$H/all/dotfiles/gemini-settings.json"
+ln -s "$H/all/dotfiles/gemini-settings.json" "$H/all/.gemini/settings.json"
 printf '# my own rules\n\nbe nice\n' > "$H/all/.codeium/windsurf/memories/global_rules.md"
 mkdir -p "$H/all/.codex"
-printf 'model = "gpt-5"\n' > "$H/all/.codex/config.toml"
+printf 'model = "gpt-5"\n# [mcp_servers.talos] goes below\n' > "$H/all/.codex/config.toml"
 hsetup "$H/all"
 
 ok "cursor mcp entry" python3 -c 'import json,sys
@@ -563,6 +611,7 @@ d = json.load(open(sys.argv[1]))
 sys.exit(0 if d["mcpServers"]["talos"] == {"command": sys.argv[2], "args": ["mcp"]} else 1)' "$H/all/.cursor/mcp.json" "$CLI"
 ok "cursor keeps other servers" jq_is "$H/all/.cursor/mcp.json" 'd["mcpServers"]["other"]["command"] == "npx"'
 ok "cursor keeps 4-space indent" grep -q '^    "mcpServers"' "$H/all/.cursor/mcp.json"
+ok "cursor keeps its 0600 mode" test "$(stat -c %a "$H/all/.cursor/mcp.json")" = 600
 ok "cursor sheet" grep -q "the served sheet" "$H/all/.cursor/skills/talos/SKILL.md"
 ok "cursor sheet frontmatter" grep -q "^name: talos" "$H/all/.cursor/skills/talos/SKILL.md"
 
@@ -579,6 +628,8 @@ sys.exit(0 if d["mcpServers"]["talos"] == {"command": sys.argv[2], "args": ["mcp
   "$H/all/.gemini/settings.json" "$CLI"
 ok "gemini keeps other settings" jq_is "$H/all/.gemini/settings.json" 'd["theme"] == "dark"'
 ok "gemini keeps 2-space indent" grep -q '^  "theme"' "$H/all/.gemini/settings.json"
+ok "gemini settings stays a symlink" test -L "$H/all/.gemini/settings.json"
+ok "gemini writes through the symlink" grep -q '"talos"' "$H/all/dotfiles/gemini-settings.json"
 ok "GEMINI.md block" grep -q "talos:begin" "$H/all/.gemini/GEMINI.md"
 
 ok "opencode mcp entry" python3 -c 'import json,sys
@@ -588,6 +639,7 @@ sys.exit(0 if d["mcp"]["talos"] == {"type": "local", "command": [sys.argv[2], "m
 ok "opencode sheet" grep -q "the served sheet" "$H/all/.config/opencode/skills/talos/SKILL.md"
 
 ok "codex block appended" grep -q "^\[mcp_servers.talos\]" "$H/all/.codex/config.toml"
+ok "a comment is not the codex block" test "$(grep -c "^\[mcp_servers.talos\]" "$H/all/.codex/config.toml")" = 1
 ok "codex keeps its own keys" grep -q '^model = "gpt-5"' "$H/all/.codex/config.toml"
 ok "claude skipped without the binary" grep -q "claude is not installed" "$T/setup.out"
 
@@ -595,6 +647,9 @@ ok "claude skipped without the binary" grep -q "claude is not installed" "$T/set
 ok "cursor backup is the original" grep -q '"npx"' "$H/all/.cursor/mcp.json.bak-talos"
 ok "cursor backup has no talos" sh -c '! grep -q talos "'"$H/all/.cursor/mcp.json.bak-talos"'"'
 ok "windsurf backup is the original" sh -c '! grep -q talos "'"$H/all/.codeium/windsurf/memories/global_rules.md.bak-talos"'"'
+ok "gemini backup is the original" sh -c '! grep -q talos "'"$H/all/dotfiles/gemini-settings.json.bak-talos"'"'
+ok "codex backup is the original" sh -c '! grep -q "^\[mcp" "'"$H/all/.codex/config.toml.bak-talos"'"'
+ok "the first run stamps no backup" test ! -e "$H/all/.config/talos/backups"
 
 # a second run changes nothing and appends nothing
 find "$H/all" -type f ! -name "*.bak-talos" -exec md5sum {} + | sort > "$T/before.md5"
@@ -619,6 +674,19 @@ d = json.load(open(sys.argv[1]))
 sys.exit(0 if d["mcpServers"]["talos"]["command"] == sys.argv[2] and d["mcpServers"]["other"] else 1)' \
   "$H/all/.cursor/mcp.json" "$CLI"
 
+# two runs in the same second each keep their own copy, in a directory only this user reads
+for w in /wrong/one /wrong/two; do
+  python3 -c 'import json,sys
+d = json.load(open(sys.argv[1])); d["mcpServers"]["talos"]["command"] = sys.argv[2]
+json.dump(d, open(sys.argv[1], "w"), indent=4)' "$H/all/.cursor/mcp.json" "$w"
+  hsetup "$H/all"
+done
+BK="$H/all/.config/talos/backups"
+ok "every stamped backup is kept" sh -c 'grep -q "/wrong/talos" "$1"/*cursor-mcp.json.* && grep -q /wrong/one "$1"/*cursor-mcp.json.* \
+  && grep -q /wrong/two "$1"/*cursor-mcp.json.*' sh "$BK"
+ok "the backups directory is private" test "$(stat -c %a "$BK")" = 700
+ok "the config directory is private" test "$(stat -c %a "$H/all/.config/talos")" = 700
+
 # a home with no harness but the two that are always written
 mkdir -p "$H/bare"
 hsetup "$H/bare"
@@ -639,18 +707,38 @@ t setup-bad-harness 2 "no harness nope" -- setup --harness nope
 t setup-bad-flag 2 "does not take --bogus" -- setup --bogus x
 
 # the blocks to paste into a harness we do not write to
-# a run that died between the markers leaves a begin with no end: the next run repairs it instead of
-# compounding it, and the user's own text is still there and backed up
+# a begin with no end is not something setup leaves behind: the text after it is the user's, and
+# the file is left exactly as it was
 MK="$H/markers/.codeium/windsurf/memories/global_rules.md"
 mkdir -p "$(dirname "$MK")"
-printf '# my own rules\n\nbe nice\n\n<!-- talos:begin (managed by `talos setup`) -->\nhalf a block\n' > "$MK"
+printf '# my own rules\n\nbe nice\n\n<!-- talos:begin (managed by `talos setup`) -->\nmy later rules\n' > "$MK"
+cp "$MK" "$T/markers.before"
 hsetup "$H/markers"
-ok "marker recovery keeps the user's rules" grep -q "be nice" "$MK"
-ok "marker recovery leaves one begin marker" \
-  sh -c 'test "$(grep -c "talos:begin" "'"$MK"'")" = 1'
-ok "marker recovery closes the block" sh -c 'test "$(grep -c "talos:end" "'"$MK"'")" = 1'
-ok "marker recovery keeps no half block" sh -c '! grep -q "half a block" "'"$MK"'"'
-ok "marker recovery backed the file up" grep -q "half a block" "$MK.bak-talos"
+ok "a stray begin marker leaves the file alone" cmp -s "$T/markers.before" "$MK"
+ok "a stray begin marker is reported" grep -q "talos:begin with no talos:end" "$T/setup.out"
+
+# a relative PATH entry is still recorded as an absolute command
+mkdir -p "$H/rel/.cursor" "$T/relcwd/bin"
+ln -s "$CLI" "$T/relcwd/bin/talos"
+( cd "$T/relcwd" && HOME="$H/rel" XDG_CONFIG_HOME="$H/rel/.config" PATH=bin:/usr/bin:/bin \
+    bin/talos setup --harness cursor >/dev/null 2>&1 )
+ok "the MCP command is absolute" jq_is "$H/rel/.cursor/mcp.json" 'd["mcpServers"]["talos"]["command"] == "'"$T/relcwd/bin/talos"'"'
+
+# codex: any spelling of the table counts as present, and a path with a quote in it stays one string
+mkdir -p "$H/toml/.codex"
+printf '[mcp_servers."talos"]\ncommand = "talos"\n' > "$H/toml/.codex/config.toml"
+hsetup "$H/toml" --harness codex
+ok "a quoted codex table is not added twice" test "$(grep -c "mcp_servers" "$H/toml/.codex/config.toml")" = 1
+Q="$T/we\"ird"; mkdir -p "$Q" "$H/quote"; cp "$CLI" "$Q/talos"
+HOME="$H/quote" XDG_CONFIG_HOME="$H/quote/.config" PATH=/usr/bin:/bin "$Q/talos" setup --harness codex >/dev/null 2>&1
+ok "a quote in the path keeps codex parsing" python3 -c 'import sys
+try:
+    import tomllib
+except ImportError:
+    sys.exit(0)
+d = tomllib.load(open(sys.argv[1], "rb"))
+sys.exit(0 if d["mcp_servers"] == {"talos": {"command": sys.argv[2], "args": ["mcp"]}} else 1)' \
+  "$H/quote/.codex/config.toml" "$Q/talos"
 
 # the skill files are backed up like every other file setup writes
 SK="$H/skills/.cursor/skills/talos/SKILL.md"

@@ -202,13 +202,24 @@ def load_config():
         return {}
 
 
+def private_dir(d):
+    if not os.path.isdir(d):
+        os.makedirs(d, 0o700)
+
+
 def save_config(c):
-    if not os.path.isdir(CONFIG_DIR):
-        os.makedirs(CONFIG_DIR, 0o700)
-    fd = os.open(CONFIG, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # never readable, not even briefly
-    with os.fdopen(fd, "w") as fh:
-        json.dump(c, fh, indent=1)
-    os.chmod(CONFIG, 0o600)
+    """By rename from a 0600 temp file: a reader never sees half a file, and the token is never in
+    a file at any other mode, not even an old config.json that was 0644."""
+    private_dir(CONFIG_DIR)
+    fd, tmp = tempfile.mkstemp(dir=CONFIG_DIR, prefix=".config-")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(c, fh, indent=1)
+        os.replace(tmp, CONFIG)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 # C0 and C1 controls, then the bidi overrides, zero-width marks and separators that reorder or hide
@@ -735,25 +746,25 @@ def device_or_prompt(url, as_json):
 
 def cmd_login(argv):
     pos, kv = opts(argv, set(["token"]))
+    if pos:
+        # an argument is in the shell history and in every process listing; stdin is neither
+        die("login takes no token argument", 2,
+            "pipe it in: printf %s \"$TOKEN\" | talos login --token, or set TALOS_TOKEN")
     url = resolve_url(refresh=True)
     if MOVED:
         die("the desk moved to %s" % MOVED, 4, "run `talos login` again to log in at the new address")
     if not url:
         die("no desk url: the pointer file did not answer", 1, "talos login --url <desk url>")
-    c = load_config()
-    if pos:
-        c["token"] = pos[0]   # scripts and CI; anyone typing it should use `talos login --token`
-    elif kv.get("token"):
-        c["token"] = prompt_token()
-    else:
-        c["token"] = device_or_prompt(url, bool(kv.get("json")))
-    c["url"] = url
-    save_config(c)
-    os.environ["TALOS_URL"], os.environ["TALOS_TOKEN"] = url, c["token"]
+    tok = prompt_token() if kv.get("token") else device_or_prompt(url, bool(kv.get("json")))
+    os.environ["TALOS_URL"], os.environ["TALOS_TOKEN"] = url, tok
     try:
         me = request("GET", "/me")
     except Desk as ex:
         fail(ex, "login")
+    # read only now: the prompt can take minutes, and a token the desk refused is never stored
+    c = load_config()
+    c["token"], c["url"] = tok, url
+    save_config(c)
     print("logged in as @%s" % clean(me["handle"]))
     note("desk %s; %d asks left today" % (url, me["asks_per_day"] - me["asks_today"]))
     refresh_skill(quiet=True)
@@ -948,16 +959,19 @@ def ensure_dir(path):
 def write_file(path, text):
     """Back up what is there, then swap the new text in by rename, so an interrupted write cannot
     leave a half file where a harness reads its instructions."""
+    path = os.path.realpath(path)   # a dotfile symlinked from somewhere else stays a symlink
     ensure_dir(path)
     if os.path.isfile(path) and open_or_empty(path) == text:
         return False
+    # these files hold other servers' keys too; a 0600 one stays 0600
+    mode = os.stat(path).st_mode & 0o7777 if os.path.exists(path) else 0o644
     backup_once(path)
     d = os.path.dirname(path) or "."
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".talos-")
     try:
         with os.fdopen(fd, "w") as fh:
             fh.write(text)
-        os.chmod(tmp, 0o644)
+        os.chmod(tmp, mode)
         os.replace(tmp, path)
     except Exception:
         if os.path.exists(tmp):
@@ -980,10 +994,13 @@ def backup_once(path):
     if not os.path.exists(bak):
         shutil.copy2(path, bak)
         return
-    if not os.path.isdir(BACKUP_DIR):
-        os.makedirs(BACKUP_DIR, 0o700)
+    private_dir(CONFIG_DIR)
+    private_dir(BACKUP_DIR)
     flat = path.replace(os.sep, "-").strip("-")
-    shutil.copy2(path, os.path.join(BACKUP_DIR, "%s.%s" % (flat, time.strftime("%Y%m%dT%H%M%S"))))
+    # two runs in the same second must not share a name, or the second copy replaces the first
+    fd, bak = tempfile.mkstemp(dir=BACKUP_DIR, prefix="%s.%s." % (flat, time.strftime("%Y%m%dT%H%M%S")))
+    os.close(fd)
+    shutil.copy2(path, bak)
 
 
 def json_indent(text):
@@ -1018,14 +1035,18 @@ def register_json(path, key, entry):
     return state + path
 
 
+# the table header in any spelling TOML allows, and only as a header, never inside a comment
+TOML_TABLE = re.compile(r"""(?m)^[ \t]*\[[ \t]*mcp_servers[ \t]*\.[ \t]*(%s|"%s"|'%s')[ \t]*\]"""
+                        % ((re.escape(MANAGED),) * 3))
+
+
 def register_toml(path, me):
     """Append only: a TOML file we did not write is not ours to reshape."""
-    if "[mcp_servers.%s]" % MANAGED in open_or_empty(path):
+    text = open_or_empty(path)
+    if TOML_TABLE.search(text):
         return "already in " + path
-    backup_once(path)
-    ensure_dir(path)
-    with open(path, "a") as fh:
-        fh.write('\n[mcp_servers.%s]\ncommand = "%s"\nargs = ["mcp"]\n' % (MANAGED, me))
+    # a JSON string is a valid TOML basic string, so a quote or backslash in the path stays a path
+    write_file(path, text + '\n[mcp_servers.%s]\ncommand = %s\nargs = ["mcp"]\n' % (MANAGED, json.dumps(me)))
     return "added to " + path
 
 
@@ -1044,11 +1065,11 @@ def register_block(path, block):
     text = open_or_empty(path)
     new = BLOCK_BEGIN + "\n" + block + "\n" + BLOCK_END
     if BLOCK_BEGIN in text:
-        # a run that died between the two markers leaves a begin with no end: everything from it to
-        # the end of the file is that half-written block, and replacing it is the recovery
         head, rest = text.split(BLOCK_BEGIN, 1)
-        tail = rest.split(BLOCK_END, 1)[1] if BLOCK_END in rest else "\n"
-        out = head + new + tail
+        if BLOCK_END not in rest:
+            # writes go by rename, so we never leave this: what follows the marker is the user's
+            return "%s has a talos:begin with no talos:end; fix the markers by hand" % path
+        out = head + new + rest.split(BLOCK_END, 1)[1]
     else:
         out = (text.rstrip() + "\n\n" if text.strip() else "") + new + "\n"
     if out == text:
@@ -1082,7 +1103,7 @@ def registered_in(row):
                 p.kill()
             return None
     if m["kind"] == "toml":
-        return "[mcp_servers.%s]" % MANAGED in open_or_empty(m["path"])
+        return bool(TOML_TABLE.search(open_or_empty(m["path"])))
     try:
         data = json.loads(open_or_empty(m["path"]) or "{}")
     except ValueError:
@@ -1131,7 +1152,8 @@ def cmd_setup(argv):
     for k in kv:
         if k not in SETUP_FLAGS:
             die("setup does not take --%s" % k, 2, "flags: --harness NAME --print-mcp --print-rules")
-    me = shutil.which("talos") or os.path.abspath(__file__)
+    # which() keeps a relative PATH entry relative, and a harness would resolve it in each project
+    me = os.path.abspath(shutil.which("talos") or __file__)
     if kv.get("print-mcp"):
         print(json.dumps({"mcpServers": {MANAGED: mcp_entry({}, me)}}, indent=2))
         return
