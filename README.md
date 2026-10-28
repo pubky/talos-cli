@@ -59,9 +59,9 @@ curl -fsSL https://raw.githubusercontent.com/pubky/talos-cli/v0.5.0/install.sh |
 ```
 
 talos 0.5.0 is sha256 `e2d26026d41bc121b1a075e1f0410d589ab1020152f8cef9af9075d5c702d649`, which is
-what `sha256sum ~/.local/bin/talos` prints after the install. A tag can be moved by anyone who can
-push here, and the README at that tag moves with it, so keep that line somewhere of your own and
-compare against your copy.
+what `sha256sum ~/.local/bin/talos` prints after the install. Release tags are protected from
+being moved or deleted, but a repo admin could lift that, so keep that line somewhere of your own
+and compare against your copy.
 
 The plugin route has no checksum. Claude Code clones this repo at the ref you added it from, `main`
 unless you say otherwise, and runs the CLI it finds under `plugins/talos/bin/`. To hold it to a
