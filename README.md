@@ -96,11 +96,11 @@ Nothing is ever overwritten: JSON files keep their own indentation and every oth
 block is appended only when it is absent, and the block in a rules file sits between
 `<!-- talos:begin -->` and `<!-- talos:end -->` markers so the rest of the file is yours. Every file
 setup modifies, skill files included, is copied to `<file>.bak-talos` the first time, and to
-`~/.config/talos/backups/<file>.<timestamp>` after that. Running it again changes nothing.
+`~/.config/talos/backups/<file>.<timestamp>.<random>` after that. A file keeps its mode, and a
+symlinked one is written through the link. Running it again changes nothing.
 
-A run that died between the two markers leaves a `talos:begin` with no `talos:end`. The next
-`talos setup` replaces everything from that marker to the end of the file with a whole block, after
-backing the file up, so a half write is repaired rather than doubled.
+Setup writes by rename, so it never leaves a `talos:begin` without its `talos:end`. When a rules file
+has one anyway, setup leaves that file alone and says so: the text after the marker is yours.
 
 The one file setup does not back up is `~/.claude.json`: Claude Code's own `claude mcp add` makes
 that edit, and `claude mcp remove -s user talos` undoes it.
@@ -112,8 +112,8 @@ you point aider at, for example `aider --read ~/.claude/skills/talos/SKILL.md`.
 
 Device login only works for org members. Ask @SHAcollision for a token, run `talos login --token`
 and paste it at the prompt. Everything else is the same. Scripts and CI that already hold a token
-can pass it as `talos login <token>` or in `TALOS_TOKEN`, but on a keyboard use the prompt: an
-argument is in the shell history and in every process listing on the machine.
+pipe it in (`printf %s "$TOKEN" | talos login --token`) or set `TALOS_TOKEN`. `talos login` takes
+no token argument: an argument is in the shell history and in every process listing on the machine.
 
 ## Where the desk lives
 

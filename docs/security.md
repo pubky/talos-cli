@@ -129,8 +129,9 @@ sentence.
 **`talos setup` edits harness config.** It appends `[mcp_servers.talos]` to `~/.codex/config.toml`,
 adds a `talos` key to the JSON configs, writes a marked block into the rules files that harnesses
 read, and writes each harness's skill file. It backs every one of those up before the first change
-(`<file>.bak-talos`, then `~/.config/talos/backups/<file>.<timestamp>`), writes by rename so an
-interrupted run leaves no half file, and only ever replaces its own block or key. It does not read
+(`<file>.bak-talos`, then `~/.config/talos/backups/<file>.<timestamp>.<random>`), writes by rename
+so an interrupted run leaves no half file, keeps each file's mode, and only ever replaces its own
+block or key. The MCP command it records is an absolute path, even when `PATH` has a relative entry. It does not read
 what else is in those files.
 
 One file is the exception, on purpose: `~/.claude.json`. Claude Code's own `claude mcp add -s user`
@@ -138,10 +139,11 @@ makes that edit, not this client, and that file holds far more than MCP servers,
 taken at install time is a worse thing to restore than the edit is to undo. Undo it with
 `claude mcp remove -s user talos`.
 
-**The token on a command line.** `talos login` with no argument asks for the token at a prompt
-(or reads one line of stdin when something pipes it in), so nothing lands in argv or the shell
-history. `talos login <token>` still works for scripts that already hold one, and that form is the
-accepted risk: an argument is readable in `/proc/<pid>/cmdline` by anyone on the machine.
+**The token on a command line.** `talos login --token` asks for the token at a prompt (or reads
+one line of stdin when something pipes it in), so nothing lands in argv or the shell history.
+`talos login` refuses a token argument, since an argument is readable in `/proc/<pid>/cmdline` by
+anyone on the machine; scripts pipe the token in or set `TALOS_TOKEN`. The config file is written
+by rename from a `0600` temp file, only after the desk accepted the token.
 
 **The desk's minimum client.** The desk sends `X-Talos-Min-Client`. Below it every verb stops with
 exit 1 and the line to run `talos update`, on the MCP path too. A minimum the client cannot parse
