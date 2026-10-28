@@ -55,17 +55,17 @@ match, so nothing unverified is ever executed or moved into place. The URL above
 because `install.sh` is what does the pinning. To pin the installer too, take it from the tag:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/pubky/talos-cli/v0.4.1/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/pubky/talos-cli/v0.5.0/install.sh | sh
 ```
 
-talos 0.4.1 is sha256 `79f90fe86b3baaa77b6f87696731046aebb739b55b8bb37ac2eacb60c999a67a`, which is
+talos 0.5.0 is sha256 `e2d26026d41bc121b1a075e1f0410d589ab1020152f8cef9af9075d5c702d649`, which is
 what `sha256sum ~/.local/bin/talos` prints after the install. A tag can be moved by anyone who can
 push here, and the README at that tag moves with it, so keep that line somewhere of your own and
 compare against your copy.
 
 The plugin route has no checksum. Claude Code clones this repo at the ref you added it from, `main`
 unless you say otherwise, and runs the CLI it finds under `plugins/talos/bin/`. To hold it to a
-release, add the marketplace at its tag: `/plugin marketplace add pubky/talos-cli#v0.4.1`.
+release, add the marketplace at its tag: `/plugin marketplace add pubky/talos-cli#v0.5.0`.
 
 What the client trusts, what it refuses from the desk, and where your token lives:
 [docs/security.md](docs/security.md).
