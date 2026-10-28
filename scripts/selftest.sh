@@ -117,6 +117,18 @@ class H(BaseHTTPRequestHandler):
         if path in ("/v/ask", "/ask"):
             self.send_response(200); self.send_header("Content-Type", "text/event-stream")
             self.send_header("Connection", "close"); self.end_headers()
+            if self.mode() == "hugestream":
+                self.wfile.write(b"data: " + b"x" * (1024 * 1024 + 10) + b"\n\n")
+                self.close_connection = True; return
+            if self.mode() == "frames":
+                # a data line with no event of its own, a payload that is not an object, and an
+                # answer split over two data lines, as the event-stream format allows
+                self.wfile.write(b'event: run.started\ndata: {"thread":"t1"}\n\n'
+                                 b'data: {"thread":"stale"}\n\n'
+                                 b'event: tool.started\ndata: 5\n\n'
+                                 b'event: run.completed\ndata: {"answer":"split answer",\n'
+                                 b'data: "thread":"t1","seconds":1}\n\n')
+                self.close_connection = True; return
             self.wfile.write(b'event: run.started\ndata: {"thread":"t1"}\n\n')
             self.wfile.write(b'event: tool.started\ndata: {"tool":"talos-find"}\n\n')
             self.wfile.write(b'event: run.completed\ndata: {"answer":"the stub answer","thread":"t1","seconds":1}\n\n')
@@ -134,6 +146,12 @@ class H(BaseHTTPRequestHandler):
             if m in MCP_BODIES:
                 return self.reply(200, MCP_BODIES[m])
             return self.reply(200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {"tools": [{"name": "talos_find"}]}})
+        if path == "/v/find" and self.mode() == "notobject":
+            return self.reply(200, [])
+        if path == "/v/find" and self.mode() == "deep":
+            return self.reply(200, b"[" * 100000 + b"]" * 100000)
+        if path == "/v/find" and self.mode() == "errlist":
+            return self.reply(401, [])
         if path == "/v/find" and self.mode() == "huge":
             return self.reply(200, {"text": "x" * (2 * 1024 * 1024)})
         if path == "/v/find" and self.mode() == "echo":
@@ -459,7 +477,36 @@ echo ok > "$T/mode"
 # a body with no end is not read into this machine's memory
 echo huge > "$T/mode"
 t oversize-response 1 "more than" -- find x
+echo hugestream > "$T/mode"
+t oversize-stream 1 "streamed more than" -- ask x
 echo ok > "$T/mode"
+
+# a desk answer that is JSON but not an object, or nested past what a parser recurses, is one error line
+echo notobject > "$T/mode"
+t not-an-object 1 "not a JSON object" -- find x
+echo deep > "$T/mode"
+t too-deep 1 "not a JSON object" -- find x
+echo errlist > "$T/mode"
+t error-not-an-object 4 "" -- find x
+echo ok > "$T/mode"
+
+# a streamed answer is read frame by frame: an event name ends with its frame, data may span lines
+echo frames > "$T/mode"
+t ask-frames 0 "split answer" -- ask x
+out=$("$CLI" ask x 2>&1)
+printf '%s' "$out" | grep -q "thread stale" && ok "a data line ran under the previous frame's event" no \
+  || ok "a data line ran under the previous frame's event" yes
+echo ok > "$T/mode"
+
+# a boolean flag takes no value, and a value-taking flag does not swallow the next flag
+t yes-with-value 2 "takes no value" -- issue pubky/x "a title" --body hi --yes=false
+t flag-swallows-flag 2 "days needs a value" -- find x --days --limit 5
+t flag-value-equals 0 "watcher lag" -- find x --from=--odd
+
+# an upload is read no further than one JSON body
+t upload-cap 2 "longer than" -- issue pubky/x "a title" --body-file /dev/zero
+head -c 1100000 /dev/zero | tr '\0' a > "$T/big.md"
+t upload-cap-md 2 "longer than" -- doc create --title t --md "$T/big.md"
 
 # the desk's minimum client is a gate, on the terminal and on the MCP path alike
 echo newdesk > "$T/mode"

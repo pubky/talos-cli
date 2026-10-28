@@ -80,6 +80,8 @@ command line, and `--url` applies to whatever verb you pass it to.
 body from the desk or from GitHub, 64 KB for the capability sheet, 8 MB for an MCP reply, 1 MB per
 line and 8 MB in total for a streamed `ask`, 4 MB for a release download. Over the cap the verb
 stops with one line. A desk that answers a `find` with 200 MB costs the client one error message.
+The same 1 MB holds for what goes the other way: `--body-file`, `--md` and stdin are read no
+further than that, so a device or an endless pipe stops with one line too.
 
 ## How an install is pinned
 
