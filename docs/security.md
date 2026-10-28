@@ -116,8 +116,9 @@ same power as writing the client itself, and it is what the tag and checksum can
 checksum can only bind a payload to a manifest, not tell you the manifest is honest. Two things
 narrow it. A reader who wants an end to end pin keeps the checksum the README publishes for a
 release and compares what got installed against that copy. Taking `install.sh` from a tag helps
-only while the tag stays put: a git tag can be moved by anyone who can push to this repo, and the
-tag carries its own README. And an installed client never re-reads `main` on its own: only
+while the tag stays put. A ruleset on this repo refuses moving or deleting any `v*` tag, with no
+bypass; a repo admin could still remove the ruleset, and the tag carries its own README, so the
+copy you keep is the stronger pin. And an installed client never re-reads `main` on its own: only
 `talos update`, which the person runs.
 
 **The plugin route has no pin.** The Claude Code plugin runs the CLI under `plugins/talos/bin/`
@@ -125,7 +126,7 @@ from the ref its marketplace was added at, `main` by default. Nothing checks tha
 release checksum; it is exactly as trusted as the commit Claude Code cloned. An installed plugin
 gets new code when its version changes and the user updates it, or on its own if they turned
 auto-update on. Adding the marketplace at a release tag (`pubky/talos-cli#v0.x.y`) holds it
-there, with the same caveat about moved tags.
+there, under the same tag ruleset.
 
 **Prose in the served sheet.** See above: the desk writes instructions your agent reads. The
 structural checks stop a code block that holds anything but `talos` lines; they do not stop a
