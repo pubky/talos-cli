@@ -244,9 +244,12 @@ def read_capped(r, cap, what="the desk"):
 
 def read_json(r, what="the desk"):
     try:
-        return json.loads(read_capped(r, JSON_MAX, what))
-    except ValueError:
-        die("%s answered something that is not JSON" % what, 1, "try again, or check `talos doctor`")
+        out = json.loads(read_capped(r, JSON_MAX, what))
+    except (ValueError, RecursionError):
+        out = None
+    if not isinstance(out, dict):
+        die("%s answered something that is not a JSON object" % what, 1, "try again, or check `talos doctor`")
+    return out
 
 
 def health(url):
@@ -371,7 +374,9 @@ def open_url(method, url, body=None, headers=None, timeout=120):
     except urllib.error.HTTPError as e:
         try:
             payload = json.loads(read_capped(e, JSON_MAX))
-        except ValueError:
+        except (ValueError, RecursionError):
+            payload = {}
+        if not isinstance(payload, dict):
             payload = {}
         raise Desk(e.code, payload.get("error") or str(e.reason), payload.get("hint", ""), payload.get("code", ""))
     except urllib.error.URLError as e:
@@ -437,19 +442,20 @@ def opts(argv, bools):
             pos += argv[i + 1:]
             break
         if a.startswith("--"):
-            k = a[2:]
-            if "=" in k:
-                k, v = k.split("=", 1)
-                kv[k] = v
-                i += 1
-            elif k in bools or k in GLOBAL_BOOLS:
+            k, eq, v = a[2:].partition("=")
+            if k in bools or k in GLOBAL_BOOLS:
+                if eq:
+                    die("--%s takes no value" % k, 2)  # --yes=false must not read as consent
                 kv[k] = True
                 i += 1
-            elif i + 1 < len(argv):
+            elif eq:
+                kv[k] = v
+                i += 1
+            elif i + 1 < len(argv) and not argv[i + 1].startswith("--"):
                 kv[k] = argv[i + 1]
                 i += 2
             else:
-                die("--%s needs a value" % k, 2)
+                die("--%s needs a value" % k, 2, "a value that starts with -- goes as --%s=<value>" % k)
         else:
             pos.append(a)
             i += 1
@@ -545,15 +551,20 @@ def render(out, kv):
 
 
 def read_source(path):
+    """It goes to the desk as one JSON body, so it is read no further than one."""
     if path in (None, "-"):
         if sys.stdin.isatty():
             die("nothing on stdin", 2, "pass a file, or pipe the markdown in")
-        return sys.stdin.read()
-    try:
-        with open(os.path.expanduser(path)) as fh:
-            return fh.read()
-    except (IOError, OSError) as e:
-        die("cannot read %s: %s" % (path, e.strerror), 2)
+        text = sys.stdin.read(JSON_MAX + 1)
+    else:
+        try:
+            with open(os.path.expanduser(path)) as fh:
+                text = fh.read(JSON_MAX + 1)
+        except (IOError, OSError) as e:
+            die("cannot read %s: %s" % (path, e.strerror), 2)
+    if len(text) > JSON_MAX:
+        die("%s is longer than %d characters" % (path or "stdin", JSON_MAX), 2, "send a shorter text")
+    return text
 
 
 def issue_body(body):
@@ -561,7 +572,7 @@ def issue_body(body):
     if f:
         body["body"] = read_source(f)
     elif not body.get("body") and not sys.stdin.isatty():
-        body["body"] = sys.stdin.read()
+        body["body"] = read_source("-")
     return body
 
 
@@ -598,7 +609,7 @@ def cmd_ask(body, kv):
             r = request("POST", "/ask", body, stream=True, timeout=20 * 60)
         else:
             fail(ex, "ask")
-    ev, final, total = None, None, 0
+    ev, data, final, total = None, [], None, 0
     while True:
         raw = r.readline(JSON_MAX + 1)
         if not raw:
@@ -606,20 +617,26 @@ def cmd_ask(body, kv):
         total += len(raw)
         if len(raw) > JSON_MAX or total > STREAM_MAX:
             die("the desk streamed more than this client will read", 1, "tell @SHAcollision")
-        line = raw.decode("utf-8", "replace").rstrip("\n")
+        line = raw.decode("utf-8", "replace").rstrip("\r\n")
         if line.startswith("event:"):
             ev = line[6:].strip()
-        elif line.startswith("data:") and ev:
+        elif line.startswith("data:"):
+            data.append(line[5:])
+        elif not line:
+            # a blank line ends the frame: its data may span lines, and its name goes with it
+            name, text, ev, data = ev, "\n".join(data), None, []
             try:
-                p = json.loads(line[5:].strip())
-            except ValueError:
+                p = json.loads(text)
+            except (ValueError, RecursionError):
                 continue
-            if ev == "run.started":
+            if not isinstance(p, dict):
+                continue
+            if name == "run.started":
                 note("talos is on it (thread %s)" % p.get("thread"))
-            elif ev == "tool.started":
+            elif name == "tool.started":
                 note("  " + str(p.get("tool")))  # note() strips control characters
-            elif ev in ("run.completed", "run.failed"):
-                final = (ev, p)
+            elif name in ("run.completed", "run.failed"):
+                final = (name, p)
                 break
     if not final:
         die("the desk closed the stream without an answer", 1, "try again")
@@ -1344,16 +1361,17 @@ def cmd_mcp(argv):
                     raise ValueError
                 # NaN and Infinity are not JSON to the agent's parser
                 frame = json.dumps(reply, allow_nan=False)
-            except ValueError:
+            except (ValueError, RecursionError):
                 answer(mid, "the desk did not answer this request")
                 continue
             out.write(frame + "\n")
             out.flush()
         except urllib.error.HTTPError as e:
             try:
-                err = json.loads(e.read(JSON_MAX).decode("utf-8", "replace")).get("error", str(e.reason))
-            except (ValueError, AttributeError):
-                err = str(e.reason)
+                err = json.loads(e.read(JSON_MAX).decode("utf-8", "replace"))
+            except (ValueError, RecursionError):
+                err = None
+            err = err.get("error", str(e.reason)) if isinstance(err, dict) else str(e.reason)
             if mid is not None:
                 answer(mid, "desk %s: %s" % (e.code, err))
         except urllib.error.URLError as e:
