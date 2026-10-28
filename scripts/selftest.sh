@@ -61,6 +61,8 @@ class H(BaseHTTPRequestHandler):
         self.end_headers(); self.wfile.write(data)
     def missing(self):
         self.reply(404, {"error": "no route", "hint": "rerun install.sh", "code": "no_such_route"})
+    def authed(self):
+        return self.headers.get("Authorization") == "Bearer tdk_stub"
     def mode(self):
         try:
             return open(sys.argv[3]).read().strip()
@@ -75,8 +77,12 @@ class H(BaseHTTPRequestHandler):
             return self.reply(200, ("http://127.0.0.2:%s\n" % sys.argv[1]).encode(), "text/plain")
         if self.path == "/desk-url-foreign.txt":
             return self.reply(200, b"https://evil.example\n", "text/plain")
-        if self.path == "/desk-url-userinfo.txt":
+        if self.path == "/desk-url-behind.txt":
             return self.reply(200, b"https://127.0.0.1:1@evil.example/\n", "text/plain")
+        if self.path == "/desk-url-userinfo.txt":
+            return self.reply(200, b"https://x@talos-desk.pubky.app/\n", "text/plain")
+        if self.path == "/desk-url-plainhttp.txt":
+            return self.reply(200, b"http://talos-desk.pubky.app\n", "text/plain")
         if self.path == "/login/config":
             if self.mode() == "unset":
                 return self.reply(503, {"error": "this desk has no GitHub OAuth app configured",
@@ -84,7 +90,7 @@ class H(BaseHTTPRequestHandler):
                                         "code": "error"})
             return self.reply(200, {"github_client_id": self.mode(), "org": "pubky"})
         if self.path == "/me":
-            if self.headers.get("Authorization") == "Bearer tdk_bad":
+            if not self.authed():
                 return self.reply(401, {"error": "no or unknown token", "hint": "talos login", "code": "no_token"})
             return self.reply(200, {"handle": "tester", "asks_today": 1, "asks_per_day": 30,
                                     "asks_global_today": 3, "asks_global_per_day": 200,
@@ -115,6 +121,11 @@ class H(BaseHTTPRequestHandler):
                                         "code": "no_token"})
             return self.reply(200, {"token": "tdk_stub", "handle": "tester", "rotated": True,
                                     "note": "this is now the only desk token for @tester; the previous one stopped working"})
+        if not path.startswith("/login/") and not self.authed():
+            return self.reply(401, {"error": "no or unknown token", "hint": "talos login", "code": "no_token"})
+        if path == "/v/find" and self.mode() == "redirect":
+            self.send_response(302); self.send_header("Location", "http://127.0.0.2:%s/me" % sys.argv[1])
+            self.send_header("Content-Length", "0"); self.end_headers(); return
         if MODE == "v01" and path.startswith("/v/"):
             return self.missing()
         if path in ("/v/ask", "/ask"):
@@ -323,7 +334,7 @@ out=$(printf '' | "$CLI" login --token 2>&1); rc=$?
 [ $rc = 2 ] && printf '%s' "$out" | grep -q "no token given" \
   && PASS=$((PASS+1)) || { echo "FAIL empty token login: exit $rc"; FAIL=$((FAIL+1)); }
 out=$(echo tdk_stub | "$CLI" login --token 2>&1); rc=$?
-[ $rc = 0 ] && printf '%s' "$out" | grep -q "logged in as @tester" \
+[ $rc = 0 ] && printf '%s' "$out" | grep -q "logged in as @tester" && ! printf '%s' "$out" | grep -q tdk_stub \
   && PASS=$((PASS+1)) || { echo "FAIL login --token: exit $rc"; FAIL=$((FAIL+1)); }
 
 # a token is never taken from argv, in either spelling, and one the desk refuses is never stored
@@ -347,7 +358,7 @@ while b"not echoed" not in buf:
     if not chunk:
         break
     buf += chunk
-os.write(fd, b"tdk_tty\n")
+os.write(fd, b"tdk_stub\n")
 while True:
     try:
         chunk = os.read(fd, 1024)
@@ -361,8 +372,8 @@ sys.stdout.write(buf.decode("utf-8", "replace"))
 sys.exit(os.WEXITSTATUS(st))
 EOF
 ); rc=$?
-[ $rc = 0 ] && printf '%s' "$out" | grep -q "logged in as @tester" && ! printf '%s' "$out" | grep -q tdk_tty \
-  && grep -q tdk_tty "$T/config/talos/config.json" \
+[ $rc = 0 ] && printf '%s' "$out" | grep -q "logged in as @tester" && ! printf '%s' "$out" | grep -q tdk_stub \
+  && grep -q tdk_stub "$T/config/talos/config.json" \
   && PASS=$((PASS+1)) || { echo "FAIL login on a terminal: exit $rc"; printf '%s\n' "$out" | sed 's/^/    /'; FAIL=$((FAIL+1)); }
 
 echo ok > "$T/mode"
@@ -509,13 +520,46 @@ refuses() { # refuses <name> <pointer route> <host that must not appear>
     grep -q "tdk_stub" "$T/ptr-$1/talos/config.json" || exit 1
     ! grep -q "$3" "$T/ptr-$1/talos/config.json" )
 }
-for case in "plainhttp desk-url-elsewhere.txt 127.0.0.2" \
+for case in "elsewhere desk-url-elsewhere.txt 127.0.0.2" \
+            "plainhttp desk-url-plainhttp.txt pubky.app" \
             "foreign desk-url-foreign.txt evil.example" \
-            "userinfo desk-url-userinfo.txt evil.example"; do
+            "behind desk-url-behind.txt evil.example" \
+            "userinfo desk-url-userinfo.txt pubky.app"; do
   set -- $case
   if refuses "$1" "$2" "$3"; then PASS=$((PASS+1))
   else echo "FAIL the pointer file moved the desk to $1"; FAIL=$((FAIL+1)); fi
 done
+
+# a stored desk that is down: an ordinary verb never reads the pointer, a pointer that does not
+# answer is no move, and a move drops TALOS_TOKEN as well as the stored token
+stale() { # stale <name> <pointer url> <command...>
+  name="$1" ptr="$2"; shift 2
+  rm -rf "$T/stale-$name"; mkdir -p "$T/stale-$name/talos"
+  echo '{"url": "http://127.0.0.1:1", "token": "tdk_stub"}' > "$T/stale-$name/talos/config.json"
+  ( unset TALOS_URL; XDG_CONFIG_HOME="$T/stale-$name" TALOS_POINTER_URL="$ptr" "$CLI" "$@" 2>&1 )
+}
+out=$(stale verb "http://127.0.0.1:$P2/desk-url.txt" whoami)
+printf '%s' "$out" | grep -q "cannot reach the desk at http://127.0.0.1:1" \
+  && grep -q "127.0.0.1:1" "$T/stale-verb/talos/config.json" \
+  && ok "an ordinary verb read the pointer file" yes || ok "an ordinary verb read the pointer file" no
+stale silent "http://127.0.0.1:1/desk-url.txt" doctor >/dev/null
+grep -q "127.0.0.1:1" "$T/stale-silent/talos/config.json" && grep -q tdk_stub "$T/stale-silent/talos/config.json" \
+  && ok "an unanswered pointer moved the desk" yes || ok "an unanswered pointer moved the desk" no
+out=$(stale envtok "http://127.0.0.1:$P2/desk-url.txt" doctor)
+printf '%s' "$out" | grep -q "the desk moved to" && printf '%s' "$out" | grep -q "FAIL token " \
+  && ! printf '%s' "$out" | grep -q tdk_stub \
+  && ok "TALOS_TOKEN followed the desk to its new address" yes \
+  || { echo "FAIL TALOS_TOKEN followed the desk to its new address"; printf '%s\n' "$out" | sed 's/^/    /'; FAIL=$((FAIL+1)); }
+
+# the stored token goes to the stored desk only, the stub checks it arrives, and a redirect is not followed
+t stored-token 0 "1/30 asks today" -- whoami
+( unset TALOS_TOKEN; "$CLI" whoami >/dev/null 2>&1 ) && ok "the stored token reached its desk" yes \
+  || ok "the stored token reached its desk" no
+( unset TALOS_TOKEN; "$CLI" whoami --url "http://127.0.0.2:$P2" 2>&1 | grep -q "not logged in at http://127.0.0.2" ) \
+  && ok "the stored token went to another --url" yes || ok "the stored token went to another --url" no
+echo redirect > "$T/mode"
+t redirect 1 "answered with a redirect" -- find x
+echo ok > "$T/mode"
 
 # nobody else on the machine reads the token
 [ "$(stat -c %a "$T/config/talos" 2>/dev/null)" = 700 ] && ok "the config directory is private" yes \

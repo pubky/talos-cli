@@ -145,7 +145,7 @@ prompt for MCP tool calls: leave it on for the talos write tools.
 - `talos ask --thread <name>` continues a conversation; every answer prints its thread name.
 - `talos delegate --key <k>` is idempotent: a retry with the same key returns the same run.
 - The desk token lives in `~/.config/talos/config.json` (mode 0600); `TALOS_TOKEN` and `TALOS_URL`
-  override it (CI, containers). The GitHub token from the device flow is never stored.
+  override it (CI, containers). The stored token is only sent to the desk it came from. The GitHub token from the device flow is never stored.
 - `talos update` installs the release `install.sh` pins, checksum first, and keeps the file it
   replaced as `talos.prev`. `talos rollback` (or `mv ~/.local/bin/talos.prev ~/.local/bin/talos`)
   goes back to it.
