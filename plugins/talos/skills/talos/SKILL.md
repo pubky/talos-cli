@@ -10,7 +10,7 @@ This page is a snapshot of the sheet the desk serves; `talos setup` and
 
 Rule of thumb: `talos find` first, it is free and instant. Then `talos skills` for what the team already wrote down. `talos ask` only when the answer needs Talos's own memory or judgement, and `talos delegate` when the job takes minutes and you do not want to wait.
 
-Not logged in? Run `talos login`, open the GitHub device prompt it prints and enter the code. The desk checks you are in the pubky org and gives you a token of its own; logging in again rotates that token and the old one stops working. Someone outside the org runs `talos login --token` and pastes the token @SHAcollision sent them; the token is never typed on a command line.
+Not logged in? Run `talos login`, open the GitHub device prompt it prints and enter the code. The desk checks you are in the pubky or synonymdev org and gives this machine a token of its own; logging in again replaces that machine's token and leaves your other machines alone, up to 5. A token lasts 180 days, and a login renews it. `talos token list` shows them. Someone outside the org runs `talos login --token` and pastes the token from @SHAcollision.
 
 ## Read verbs: free, seconds, no model
 
@@ -111,6 +111,22 @@ Stop a delegated run you started. Use it when you delegated the wrong thing.
 
 ```
 talos stop 8f2c1a
+```
+
+`talos token list`
+
+Your tokens, one per machine, and when each was last used. Use it to spot a machine you do not know, or find the one to revoke.
+
+```
+talos token list
+```
+
+`talos token revoke <id | name> [--all] [--yes]`
+
+Stop one of your tokens working, or all of them. Use it when a machine is gone or a token leaked; logging in again only replaces the token of that machine.
+
+```
+talos token revoke old-laptop --yes
 ```
 
 `talos doc read <docId>`

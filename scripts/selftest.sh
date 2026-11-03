@@ -13,9 +13,10 @@ P2=$((17600 + RANDOM % 400)); P1=$((18100 + RANDOM % 400))
 
 cat > "$T/stub.py" <<'EOF'
 """A desk with canned answers. argv: <port> <v01|v02> <mode file> [bind address]."""
-import json, os, socket, struct, sys
+import json, os, socket, struct, sys, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 MODE = sys.argv[2]
+LOGINS = os.environ["LOGINS"]
 CANNED = {
     "/v/find": {"results": {"slack": [{"date": "2026-09-01", "who": "alice", "where": "#dev",
                                        "snippet": "watcher lag", "link": "https://slack/x"}]},
@@ -27,6 +28,8 @@ CANNED = {
     "/v/issue": {"confirmed": False, "preview": "file a GitHub issue\n  repo:   pubky/x"},
     "/v/jobs": {"jobs": [], "text": "no delegated jobs in the last 30 days"},
     "/v/stop": {"text": "stopping run abc"},
+    "/v/token_list": {"tokens": [], "text": "9f3a1c2e  laptop  (this one)"},
+    "/v/token_revoke": {"status": "revoked", "text": "revoked: laptop"},
     "/find": {"results": {"slack": []}, "errors": {}},
     "/review": {"status": "queued", "url": "https://github.com/pubky/x/pull/1", "note": "on it"},
 }
@@ -95,7 +98,9 @@ class H(BaseHTTPRequestHandler):
             return self.reply(200, {"handle": "tester", "asks_today": 1, "asks_per_day": 30,
                                     "asks_global_today": 3, "asks_global_per_day": 200,
                                     "resets_at": "2026-09-15T00:00:00Z", "writes_today": 0, "writes_per_day": 20,
-                                    "delegates_today": 0, "delegates_per_day": 5, "admin": False})
+                                    "delegates_today": 0, "delegates_per_day": 5, "admin": False,
+                                    **({"token_expires": time.strftime("%Y-%m-%d", time.gmtime(time.time() + 5 * 86400))}
+                                       if self.mode() == "expiring" else {})})
         if MODE == "v01":
             return self.missing()
         if self.path == "/skill":
@@ -119,8 +124,9 @@ class H(BaseHTTPRequestHandler):
             if body.get("access_token") != "gho_fake":
                 return self.reply(401, {"error": "GitHub rejected that token", "hint": "run `talos login` again",
                                         "code": "no_token"})
+            open(LOGINS, "a").write(json.dumps(body.get("name")) + "\n")
             return self.reply(200, {"token": "tdk_stub", "handle": "tester", "rotated": True,
-                                    "note": "this is now the only desk token for @tester; the previous one stopped working"})
+                                    "note": "this replaces your laptop token, the previous one stopped working"})
         if not path.startswith("/login/") and not self.authed():
             return self.reply(401, {"error": "no or unknown token", "hint": "talos login", "code": "no_token"})
         if path == "/v/find" and self.mode() == "redirect":
@@ -237,6 +243,7 @@ PG=$((18600 + RANDOM % 400))
 READY="$T/up-gh" python3 "$T/github.py" "$PG" & GH=$!
 export TALOS_GITHUB_OAUTH="http://127.0.0.1:$PG"
 
+export LOGINS="$T/logins"
 READY="$T/up-v2" python3 "$T/stub.py" "$P2" v02 "$T/mode" & V2=$!
 # the same stub on another loopback address, so the pointer file can name a live plain-http desk
 READY="$T/up-v3" python3 "$T/stub.py" "$P2" v02 "$T/mode" 127.0.0.2 & V3=$!
@@ -379,6 +386,17 @@ EOF
 echo ok > "$T/mode"
 t login-device 0 "Open https://github.com/login/device and enter code ABCD-1234" -- login
 t login-device-handle 0 "logged in as @tester" -- login
+t login-device-named 0 "logged in as @tester" -- login --name my-box
+tail -1 "$LOGINS" | grep -q '"my-box"' && PASS=$((PASS+1)) || { echo "FAIL login --name did not reach the desk: $(tail -1 "$LOGINS")"; FAIL=$((FAIL+1)); }
+sed -n 1p "$LOGINS" | grep -qE '^"[A-Za-z0-9._-]{1,32}"$' && PASS=$((PASS+1)) || { echo "FAIL a plain login sent no machine name: $(sed -n 1p "$LOGINS")"; FAIL=$((FAIL+1)); }
+t login-name-with-token 2 "is for a GitHub login" -- login --token --name x
+echo expiring > "$T/mode"
+t whoami-expiring 0 "expires 20" -- whoami
+echo ok > "$T/mode"
+t whoami-not-expiring 0 "@tester" -- whoami
+t token-list 0 "laptop" -- token list
+t token-revoke 0 "revoked: laptop" -- token revoke laptop --yes
+t token-revoke-all 0 "revoked: laptop" -- token revoke --all --yes
 echo denied > "$T/mode"
 t login-denied 1 "cancelled on GitHub" -- login
 echo expired > "$T/mode"
