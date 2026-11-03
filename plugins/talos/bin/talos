@@ -2,7 +2,7 @@
 """talos: Talos, the pubky team's agent, from your terminal or your coding agent.
 
   talos                      list every verb by tier      talos <verb> --help   usage and flags
-  talos login                                             log in with your GitHub account (device prompt)
+  talos login [--name N]                                  log this machine in with your GitHub account (device prompt)
   talos login --token                                     log in by pasting a token (people outside the org)
   talos doctor                                            check config, desk, token, skill, MCP, version
   talos setup                                             register the skill and MCP server with every harness found
@@ -34,6 +34,7 @@ Exit codes: 0 ok, 1 error, 2 usage, 3 over budget, 4 not logged in or token revo
 6 not found, 7 refused by a Talos rule.
 Single file, Python 3.8+, standard library only. Source: https://github.com/pubky/talos-cli
 """
+import calendar
 import getpass
 import hashlib
 import http.client
@@ -41,6 +42,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -129,6 +131,14 @@ VERBS = [
     {"cmd": "stop", "verb": "stop", "tier": "write", "pos": [("run_id", True, "<run-id>")], "flags": [],
      "one": "stop a delegated run you started", "when": "when you delegated the wrong thing",
      "usage": "talos stop <run-id> [--yes]", "example": "talos stop 8f2c1a --yes"},
+    {"cmd": "token list", "verb": "token_list", "tier": "read", "pos": [], "flags": [],
+     "one": "your tokens, one per machine, and when each was last used",
+     "when": "to spot a machine you do not know, or find the one to revoke",
+     "usage": "talos token list", "example": "talos token list"},
+    {"cmd": "token revoke", "verb": "token_revoke", "tier": "write", "pos": [("id", False, "<id | name>")], "flags": [],
+     "bools": ["all"], "one": "stop one of your tokens working, or all of them",
+     "when": "when a machine is gone or a token leaked; logging in again only replaces the token of that machine",
+     "usage": "talos token revoke <id | name> [--all] [--yes]", "example": "talos token revoke old-laptop --yes"},
     {"cmd": "doc read", "verb": "doc_read", "tier": "read", "pos": [("id", True, "<docId>")], "flags": [],
      "one": "a Google Doc back as markdown", "when": "to quote or diff a doc Talos wrote",
      "usage": "talos doc read <docId>", "example": "talos doc read 1AbC_defGH"},
@@ -757,7 +767,14 @@ def prompt_token():
     return tok
 
 
-def device_or_prompt(url, as_json):
+def machine_name():
+    """Logging in again under the same name replaces that token, so the default has to stay the
+    same on one machine and differ between two."""
+    host = re.sub(r"[^A-Za-z0-9._-]", "-", socket.gethostname().split(".")[0])[:32]
+    return host or None
+
+
+def device_or_prompt(url, as_json, name):
     """The GitHub device flow when the desk has an OAuth app; a pasted token when it does not."""
     try:
         cfg = read_json(open_url("GET", url + "/login/config", timeout=20))
@@ -765,7 +782,7 @@ def device_or_prompt(url, as_json):
         note("talos: %s" % ex.error)
         note("talos: paste the token @SHAcollision sent you instead")
         return prompt_token()
-    return post_login(url, device_login(url, cfg, as_json))["token"]
+    return post_login(url, device_login(url, cfg, as_json), name)["token"]
 
 
 def cmd_login(argv):
@@ -779,7 +796,9 @@ def cmd_login(argv):
         die("the desk moved to %s" % MOVED, 4, "run `talos login` again to log in at the new address")
     if not url:
         die("no desk url: the pointer file did not answer", 1, "talos login --url <desk url>")
-    tok = prompt_token() if kv.get("token") else device_or_prompt(url, bool(kv.get("json")))
+    if kv.get("token") and kv.get("name"):
+        die("--name is for a GitHub login", 2, "a pasted token keeps the name it was minted with")
+    tok = prompt_token() if kv.get("token") else device_or_prompt(url, bool(kv.get("json")), kv.get("name") or machine_name())
     os.environ["TALOS_URL"], os.environ["TALOS_TOKEN"] = url, tok
     try:
         me = request("GET", "/me")
@@ -794,15 +813,27 @@ def cmd_login(argv):
     refresh_skill(quiet=True)
 
 
-def post_login(url, github_token):
+def post_login(url, github_token, name):
+    body = {"access_token": github_token}
+    if name:
+        body["name"] = name
     try:
-        out = read_json(open_url("POST", url + "/login/github", {"access_token": github_token},
-                                 timeout=60))
+        out = read_json(open_url("POST", url + "/login/github", body, timeout=60))
     except Desk as ex:
         die(ex.error, EXIT.get(ex.status, 1), ex.hint)
     if out.get("note"):
         note(out["note"])
     return out
+
+
+def expiry_note(me):
+    when = me.get("token_expires")
+    try:
+        left = (calendar.timegm(time.strptime(when, "%Y-%m-%d")) - time.time()) / 86400
+    except (TypeError, ValueError):
+        return  # a desk from before expiry says nothing
+    if left <= 14:
+        note("talos: this token expires %s; run `talos login` to renew it" % clean(when))
 
 
 def cmd_whoami(argv):
@@ -821,6 +852,7 @@ def cmd_whoami(argv):
             me["writes_today"], me["writes_per_day"], me["delegates_today"], me["delegates_per_day"],
             ", admin" if me.get("admin") else "")
     print(line)
+    expiry_note(me)
 
 
 def cmd_skill(argv):
@@ -1238,6 +1270,8 @@ def cmd_doctor(argv):
             note("talos: /me said %s" % ex)
     good &= check("token valid", bool(who), ("@" + clean(who["handle"])) if who else "rejected",
                   "talos login")
+    if who:
+        expiry_note(who)
     installed = [p for p in SKILL_PATHS if os.path.isfile(p)]
     good &= check("skill installed", bool(installed), ", ".join(installed) or "nowhere", "talos setup")
     for row in live_harnesses():
@@ -1489,7 +1523,7 @@ This page is a snapshot of the sheet the desk serves; `talos setup` and
 
 Rule of thumb: `talos find` first, it is free and instant. Then `talos skills` for what the team already wrote down. `talos ask` only when the answer needs Talos's own memory or judgement, and `talos delegate` when the job takes minutes and you do not want to wait.
 
-Not logged in? Run `talos login`, open the GitHub device prompt it prints and enter the code. The desk checks you are in the pubky org and gives you a token of its own; logging in again rotates that token and the old one stops working. Someone outside the org runs `talos login --token` and pastes the token @SHAcollision sent them; the token is never typed on a command line.
+Not logged in? Run `talos login`, open the GitHub device prompt it prints and enter the code. The desk checks you are in the pubky or synonymdev org and gives this machine a token of its own; logging in again replaces that machine's token and leaves your other machines alone, up to 5. A token lasts 180 days, and a login renews it. `talos token list` shows them. Someone outside the org runs `talos login --token` and pastes the token from @SHAcollision.
 
 ## Read verbs: free, seconds, no model
 
@@ -1590,6 +1624,22 @@ Stop a delegated run you started. Use it when you delegated the wrong thing.
 
 ```
 talos stop 8f2c1a
+```
+
+`talos token list`
+
+Your tokens, one per machine, and when each was last used. Use it to spot a machine you do not know, or find the one to revoke.
+
+```
+talos token list
+```
+
+`talos token revoke <id | name> [--all] [--yes]`
+
+Stop one of your tokens working, or all of them. Use it when a machine is gone or a token leaked; logging in again only replaces the token of that machine.
+
+```
+talos token revoke old-laptop --yes
 ```
 
 `talos doc read <docId>`

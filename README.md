@@ -13,7 +13,9 @@ where the shell history and every process listing on the machine would have it.
 
 No URL to look up either: `talos login` prints an "Open ... and enter code ..." line, you open that
 page, type the code, and the desk checks your pubky org membership and gives you a token of its own.
-Logging in again rotates it, so the old one stops working.
+Each machine gets its own, up to five: logging in again replaces that machine's token and leaves the
+others alone, and `talos login --name <label>` picks the name when the hostname will not do. A token
+lasts 180 days and a login renews it. `talos token list` shows yours, `talos token revoke` stops one.
 
 ```
 talos                                   every verb, by tier
