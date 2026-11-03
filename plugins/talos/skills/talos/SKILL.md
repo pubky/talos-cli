@@ -160,7 +160,7 @@ talos doc create --title "Nexus watcher postmortem" --md postmortem.md --yes
 Book a Google Meet call and bring the summary back to Slack. Use it when a thread needs a call; the preview warns if someone is on holiday.
 
 ```
-talos meet book --title "nexus sync" --start 2026-09-20T14:00 --end 2026-09-20T14:30 --tz Europe/Berlin --with "Ben Kaufman,tomos" --yes
+talos meet book --title "nexus sync" --start 2026-09-20T14:00 --end 2026-09-20T14:30 --tz Europe/Berlin --with "alice,bob" --yes
 ```
 
 `talos remember "<fact>" [--yes]`
